@@ -450,7 +450,10 @@ async function loadTasks(){
       .map(r => ({...r.data, id:r.id}));
     const cfgRow = (data||[]).find(r=>r.id==="__settings__");
     if(cfgRow && cfgRow.data){
-      ["emailEndpoint","reminderLeadMin","team"].forEach(k=>{
+      // Note: emailEndpoint is intentionally NOT loaded — the endpoint is a fixed
+      // code constant (EMAIL_ENDPOINT). Older saved settings may contain a stale
+      // value (e.g. /api/notify); ignoring it prevents calling a dead endpoint.
+      ["reminderLeadMin","team"].forEach(k=>{
         if(cfgRow.data[k]!=null) state.cfg[k]=cfgRow.data[k];
       });
       MANAGERS.forEach(mn=>{ if(!state.cfg.team.some(m=>m.name===mn)) state.cfg.team.push({name:mn, department:"Managers", role:"Manager", email:"", phone:""}); });
@@ -488,7 +491,6 @@ async function deleteTaskRemote(id){
 }
 async function persistSharedSettings(){
   const shared = {
-    emailEndpoint: state.cfg.emailEndpoint,
     reminderLeadMin: state.cfg.reminderLeadMin,
     team: state.cfg.team
   };
@@ -516,9 +518,10 @@ function taskEmailFields(task){
     link: location.origin + location.pathname
   };
 }
+const EMAIL_ENDPOINT = "/api/send-email";   // serverless email function (Resend)
 async function postEmail(payload){
   try{
-    const r = await fetch(state.cfg.emailEndpoint || "/api/send-email", {
+    const r = await fetch(EMAIL_ENDPOINT, {
       method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify(payload)});
     return r.ok;
@@ -1228,11 +1231,11 @@ function bindSettings(c){
     if(!me || !me.email){ toast("Add your name + email in the directory below first"); return; }
     const fields=taskEmailFields({name:"Test notification",owner:state.user,manager:"",department:"Operations",priority:"Normal",status:"To Do",startDate:todayStr(),startTime:"09:00",dueDate:todayStr(),dueTime:"17:00",attachments:[]});
     try{
-      const r=await fetch(state.cfg.emailEndpoint||"/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},
+      const r=await fetch(EMAIL_ENDPOINT,{method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({to:me.email,cc:"",kind:"Test Notification",event:"test",task:fields})});
       const data=await r.json().catch(()=>({}));
       if(r.ok){ toast("Test email sent to "+me.email); }
-      else { alert("Test failed:\n\n"+(data.error||("HTTP "+r.status))+"\n\nFix: open "+(state.cfg.emailEndpoint||"/api/send-email")+" in a browser to check the server config, then confirm RESEND_API_KEY / RESEND_FROM are set in Vercel and redeploy."); }
+      else { alert("Test failed:\n\n"+(data.error||("HTTP "+r.status))+"\n\nFix: open "+EMAIL_ENDPOINT+" in a browser to check the server config, then confirm RESEND_API_KEY / RESEND_FROM are set in Vercel and redeploy."); }
     }catch(e){ alert("Test failed: "+(e.message||e)); }
   };
   c.querySelectorAll("[data-team]").forEach(el=>el.onchange=()=>{ state.cfg.team[+el.dataset.i][el.dataset.team]=el.value; });
