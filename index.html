@@ -324,6 +324,11 @@ function mapStatus(s){
 function mapCadence(c){ if(!c || c==="None") return "One Off"; return c; }
 function isDone(t){ return t.status===DONE_STATUS; }
 function isRecurring(t){ return ["Daily","Weekly","Bi-Weekly","Monthly"].includes(t.cadence); }
+/* A task is "completed/archived" once finished — kept in Supabase for history but
+   hidden from the active board. Old completed tasks (no archived flag) still count
+   as completed via their status. "Active" = everything not completed/archived. */
+function isCompleted(t){ return t.archived===true || isDone(t); }
+function isActive(t){ return !isCompleted(t); }
 /* Manager dropdown uses this exact list */
 const MANAGERS = ["Sammy","Lisa","Dyana","Leo","Dawn","Rob"];
 /* Only these users (by profile name) may add/edit/delete tasks. Everyone else
@@ -650,17 +655,25 @@ async function saveTask(t, {isNew}={}){
   render();
 }
 
+/* Build the next recurring occurrence. Dates are shifted from the ORIGINAL
+   scheduled start/due dates (t.startDate / t.dueDate), never from the completion
+   time, so the schedule pattern is preserved. Times carry over unchanged. */
 function nextOccurrence(t){
   const clone = JSON.parse(JSON.stringify(t));
   clone.id = uid();
+  // Reset everything that is specific to a single instance.
   clone.status = "To Do";
+  clone.archived = false;
   clone.completedAt = null;
+  clone.completedBy = "";
+  clone.completionType = null;
+  clone.attachments = [];                 // new instance starts without a file
   clone.lastUpdate = new Date().toISOString();
   clone.createdAt = new Date().toISOString();
   clone.comments = []; clone.activity = [];
   delete clone._spawned;
   clone.notif = {assigned:false, almost:false, overdue:false, approval:false, lastOwner:t.owner||""};
-  (clone.checklist||[]).forEach(c=>c.done=false);
+  (clone.checklist||[]).forEach(c=>c.done=false);   // keep checklist template, unticked
   const shift = (dateStr, unit)=>{
     if(!dateStr) return dateStr;
     const d = new Date(dateStr+"T00:00");
@@ -672,8 +685,9 @@ function nextOccurrence(t){
   };
   clone.startDate = shift(t.startDate, t.cadence);
   clone.dueDate   = shift(t.dueDate, t.cadence);
-  // start time and due time are preserved exactly (copied via the deep clone)
-  addActivity(clone, `Auto-created from recurring (${t.cadence}) task`);
+  // carries over: name, owner, manager, department, priority, cadence,
+  // requiresApproval, notes, checklist (unticked), start time, due time.
+  addActivity(clone, "Recurring task created");
   return clone;
 }
 
@@ -685,10 +699,15 @@ async function markDone(t){
   }
   const recurring = isRecurring(t);   // One Off does not spawn a next task
   const alreadySpawned = t._spawned;
+  // Archive the completed instance — kept in Supabase for reporting/history,
+  // hidden from the active board.
   t.status = DONE_STATUS;
+  t.archived = true;
   t.completedAt = new Date().toISOString();
+  t.completedBy = state.user || "";
+  t.completionType = recurring ? "recurring_completed" : "one_off_completed";
   t.lastUpdate = new Date().toISOString();
-  addActivity(t, "Marked "+DONE_STATUS);
+  addActivity(t, "Completed/Approved");
   if(recurring && !alreadySpawned){
     t._spawned = true;
     await persistTask(t);
@@ -696,10 +715,10 @@ async function markDone(t){
     state.tasks.push(next);
     await persistTask(next);
     if(next.owner){ await notifyAssigned(next,"created"); await persistTask(next); }
-    toast(`Next ${t.cadence.toLowerCase()} task created for ${fmtDateTime(next.dueDate,next.dueTime)}`);
+    toast(`Completed · next ${t.cadence.toLowerCase()} task created for ${fmtDateTime(next.dueDate,next.dueTime)}`);
   }else{
     await persistTask(t);
-    toast("Task completed");
+    toast("Task completed & archived");
   }
   render();
 }
@@ -776,6 +795,10 @@ async function moveDueDate(t){
 }
 
 /* ---- Filtering / sorting --------------------------------------------------- */
+/* True when the user is explicitly viewing completed/archived tasks. */
+function showingCompleted(){
+  return state.chip==="completed" || state.dash==="completedWeek" || state.filt.status===DONE_STATUS;
+}
 function visibleTasks(){
   let list = state.tasks.slice();
   const f = state.filt, q = state.search.trim().toLowerCase();
@@ -786,17 +809,21 @@ function visibleTasks(){
     (t.notes||"").toLowerCase().includes(q) ||
     (t.department||"").toLowerCase().includes(q));
 
+  // The active board shows only active tasks; completed/archived tasks appear
+  // only when the Completed view (chip, dashboard card, or status filter) is on.
+  if(!showingCompleted()) list = list.filter(isActive);
+
   switch(state.chip){
     case "my": list=list.filter(t=>t.owner===state.user); break;
     case "overdue": list=list.filter(isOverdue); break;
     case "today": list=list.filter(isDueToday); break;
     case "stuck": list=list.filter(t=>t.status==="Stuck"); break;
     case "approval": list=list.filter(t=>t.status==="For Approval"); break;
-    case "completed": list=list.filter(isDone); break;
+    case "completed": list=list.filter(isCompleted); break;
     case "recurring": list=list.filter(isRecurring); break;
   }
   switch(state.dash){
-    case "active": list=list.filter(t=>!isDone(t)); break;
+    case "active": list=list.filter(isActive); break;
     case "overdue": list=list.filter(isOverdue); break;
     case "today": list=list.filter(isDueToday); break;
     case "stuck": list=list.filter(t=>t.status==="Stuck"); break;
@@ -996,9 +1023,9 @@ function boardTable(tasks){
 
 /* ---- Dashboard ------------------------------------------------------------- */
 function viewDashboard(){
-  const active = state.tasks.filter(t=>!isDone(t)).length;
-  const overdue = state.tasks.filter(isOverdue).length;
-  const today = state.tasks.filter(isDueToday).length;
+  const active = state.tasks.filter(isActive).length;
+  const overdue = state.tasks.filter(t=>isActive(t)&&isOverdue(t)).length;
+  const today = state.tasks.filter(t=>isActive(t)&&isDueToday(t)).length;
   const stuckN = state.tasks.filter(t=>t.status==="Stuck").length;
   const approvalN = state.tasks.filter(t=>t.status==="For Approval").length;
   const doneWk = state.tasks.filter(isCompletedThisWeek).length;
@@ -1133,18 +1160,19 @@ function viewMyTasks(){
 /* ---- Departments ----------------------------------------------------------- */
 function viewDepartments(){
   const cards = DEPARTMENTS.map(d=>{
-    const tasks=state.tasks.filter(t=>t.department===d);
-    const open=tasks.filter(t=>!isDone(t)).length;
+    const all=state.tasks.filter(t=>t.department===d);
+    const tasks=all.filter(isActive);                 // active board view (no completed)
+    const open=tasks.length;
     const od=tasks.filter(isOverdue).length;
-    const members=[...new Set(tasks.map(t=>t.owner).filter(Boolean).concat((state.cfg.team||[]).filter(m=>m.department===d).map(m=>m.name)))];
+    const members=[...new Set(all.map(t=>t.owner).filter(Boolean).concat((state.cfg.team||[]).filter(m=>m.department===d).map(m=>m.name)))];
     return `<div class="card sect" style="margin-bottom:14px">
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
         <div class="bar" style="width:6px;height:30px;border-radius:5px;background:${DEPT_COLOR[d]}"></div>
         <div><div style="font-weight:700;font-size:16px">${esc(d)}</div>
-        <div class="sub">${tasks.length} total · ${open} open · ${od?`<span class="overdue-txt">${od} overdue</span>`:'0 overdue'}</div></div>
+        <div class="sub">${open} active · ${od?`<span class="overdue-txt">${od} overdue</span>`:'0 overdue'}</div></div>
         <div class="mem" style="margin-left:auto">${members.slice(0,8).map(m=>`<span class="av" style="background:${DEPT_COLOR[d]}" title="${esc(m)}">${esc(initials(m))}</span>`).join("")}</div>
       </div>
-      ${tasks.length?boardTable(tasks.slice().sort((a,b)=>(dueDateTime(a)||9e15)-(dueDateTime(b)||9e15)).slice(0,8)):'<div class="empty">No tasks in this department.</div>'}
+      ${tasks.length?boardTable(tasks.slice().sort((a,b)=>(dueDateTime(a)||9e15)-(dueDateTime(b)||9e15)).slice(0,8)):'<div class="empty">No active tasks in this department.</div>'}
     </div>`;
   }).join("");
   return `<div class="page-head"><div><h1>Departments</h1><div class="sub">Team members and workload by department</div></div></div>${cards}`;
@@ -1152,7 +1180,7 @@ function viewDepartments(){
 
 /* ---- Recurring ------------------------------------------------------------- */
 function viewRecurring(){
-  const rec = state.tasks.filter(isRecurring)
+  const rec = state.tasks.filter(t=>isRecurring(t) && isActive(t))
     .sort((a,b)=>(dueDateTime(a)||9e15)-(dueDateTime(b)||9e15));
   const groups = {Daily:[],Weekly:[],"Bi-Weekly":[],Monthly:[]};
   rec.forEach(t=>{ (groups[t.cadence]||(groups[t.cadence]=[])).push(t); });
@@ -1186,9 +1214,25 @@ function viewReports(){
   const recRate=recTotal?Math.round(recDone/recTotal*100):0;
   const stuckN=state.tasks.filter(t=>t.status==="Stuck").length;
 
-  const bars=(arr,colorFn)=>{ const max=Math.max(1,...arr.map(a=>a.n)); return arr.map(a=>`
+  // Completed/archived tasks (kept in Supabase) for completion reporting.
+  const completed=state.tasks.filter(isCompleted).sort((a,b)=>new Date(b.completedAt||0)-new Date(a.completedAt||0));
+  const tally=(keyFn)=>{ const m={}; completed.forEach(t=>{ const k=keyFn(t)||"—"; m[k]=(m[k]||0)+1; }); return Object.entries(m).map(([label,n])=>({label,n})).sort((a,b)=>b.n-a.n).slice(0,12); };
+  const compByOwner=tally(t=>t.owner);
+  const compByDept=tally(t=>t.department);
+  const compByManager=tally(t=>t.manager);
+  const compByCadence=tally(t=>t.cadence);
+
+  const bars=(arr,colorFn)=>{ const max=Math.max(1,...arr.map(a=>a.n)); return (arr.length?arr:[{label:'—',n:0}]).map(a=>`
     <div class="bar-row"><div class="bl" title="${esc(a.label)}">${esc(a.label)}</div>
     <div class="bar-track"><div class="bar-fill" style="width:${a.n?Math.max(a.n/max*100,6):0}%;background:${colorFn?colorFn(a):'var(--accent)'}">${a.n||''}</div></div></div>`).join(""); };
+
+  const fileLink=t=>{ const a=(t.attachments&&t.attachments[0]); return (a&&a.url)?`<a href="${esc(a.url)}" target="_blank" rel="noreferrer">file</a>`:'—'; };
+  const completedRows=completed.slice(0,200).map(t=>`<tr>
+    <td>${esc(t.name)}</td><td>${esc(t.owner||'—')}</td><td>${esc(t.manager||'—')}</td><td>${esc(t.department)}</td>
+    <td>${esc(t.cadence||'—')}</td><td>${t.completedAt?fmtFull(t.completedAt):'—'}</td>
+    <td>${esc(t.completedBy||'—')}</td><td>${esc(fmtDateTime(t.startDate,t.startTime))}</td>
+    <td>${esc(fmtDateTime(t.dueDate,t.dueTime))}</td><td>${t.lastUpdate?fmtFull(t.lastUpdate):'—'}</td><td>${fileLink(t)}</td>
+  </tr>`).join("");
 
   return `<div class="page-head"><div><h1>Reports</h1><div class="sub">Live metrics across the board</div></div></div>
   <div class="rep-grid">
@@ -1196,6 +1240,10 @@ function viewReports(){
     <div class="card sect"><h2>Overdue Task Trend</h2>${bars(odTrend,()=>'var(--red)')}</div>
     <div class="card sect"><h2>Tasks by Department</h2>${bars(byDept,a=>a.color)}</div>
     <div class="card sect"><h2>Tasks by Owner</h2>${owners.length?bars(owners,()=>'var(--d-marketing)'):'<div class="empty">No owners yet.</div>'}</div>
+    <div class="card sect"><h2>Completed by Owner</h2>${bars(compByOwner,()=>'var(--d-finance)')}</div>
+    <div class="card sect"><h2>Completed by Department</h2>${bars(compByDept,a=>DEPT_HEX[a.label]||'var(--d-finance)')}</div>
+    <div class="card sect"><h2>Completed by Manager</h2>${bars(compByManager,()=>'var(--d-managers)')}</div>
+    <div class="card sect"><h2>Completed by Cadence</h2>${bars(compByCadence,()=>'var(--d-operations)')}</div>
     <div class="card sect"><h2>Recurring Completion Rate</h2>
       <div style="display:flex;align-items:center;gap:16px">
         <div style="font-size:40px;font-weight:800;color:var(--d-finance)">${recRate}%</div>
@@ -1207,6 +1255,14 @@ function viewReports(){
       <div style="font-size:40px;font-weight:800;color:${stuckN?'var(--red)':'var(--d-finance)'}">${stuckN}</div>
       <div class="sub">${stuckN?'Needs attention — see Stuck Tasks on the dashboard.':'Nothing stuck right now.'}</div>
     </div>
+  </div>
+  <div class="card sect" style="margin-top:16px">
+    <h2>✓ Completed Tasks (Archive) <span class="cnt">${completed.length}</span></h2>
+    <div class="sub" style="margin:-6px 0 12px;color:var(--muted2)">Every completed task is kept here for history — completed one-off tasks and each completed recurring instance. Use the board's <b>Completed</b> filter to search them.</div>
+    ${completed.length?`<div style="overflow-x:auto"><table>
+      <thead><tr><th>Task</th><th>Owner</th><th>Manager</th><th>Department</th><th>Cadence</th><th>Completed</th><th>By</th><th>Start</th><th>Due</th><th>Last Update</th><th>File</th></tr></thead>
+      <tbody>${completedRows}</tbody></table></div>${completed.length>200?'<div class="sub" style="margin-top:8px">Showing the 200 most recent.</div>':''}`
+      :'<div class="empty">No completed tasks yet.</div>'}
   </div>`;
 }
 

@@ -141,6 +141,7 @@ export default async function handler(req, res) {
 
     const changed = [];
     for (const t of tasks) {
+      if (t.archived || isDoneStatus(t.status)) continue;   // completed/archived: no emails
       const n = t.notif || (t.notif = { assigned: false, almost: false, overdue: false, approval: false, lastOwner: t.owner || "" });
       if (n.approval === undefined) n.approval = false;
       const ownerEmail = emailFor(t.owner, t.ownerEmail);
@@ -157,8 +158,8 @@ export default async function handler(req, res) {
         if (await emailTask(managerEmail, "", "Task Ready For Approval", t)) { n.approval = true; didChange = true; }
       }
 
-      // Due reminders -> owner + cc manager (skip done / approval-pending)
-      if (!isDoneStatus(t.status) && t.status !== "For Approval") {
+      // Due reminders -> owner + cc manager (skip done / archived / approval-pending)
+      if (!isDoneStatus(t.status) && !t.archived && t.status !== "For Approval") {
         const due = dueInstant(t);
         if (due != null) {
           const ms = due - now;
