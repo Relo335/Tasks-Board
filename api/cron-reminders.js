@@ -1,31 +1,27 @@
 // api/cron-reminders.js — Vercel serverless function (Node.js 18+ runtime)
 //
-// Server-side reminder scan. Runs on a schedule (Vercel Cron or any external
-// cron) so almost-overdue and overdue email notifications fire even when nobody
-// has the task board open in a browser.
+// Server-side notification scan. Runs on a schedule (Vercel Cron or any external
+// cron) so emails fire even when nobody has the task board open in a browser.
 //
-// It reads tasks straight from Supabase (anon key — service role is NOT used),
-// emails each reminder to the task owner (cc manager) by posting to your Google
-// Apps Script web app, and writes back per-task notif flags so reminders are
-// never sent twice (matches the in-app logic).
+// It reads tasks from Supabase (anon key — service role is NOT used) and emails
+// via Resend (lib/email.js):
+//   - Assigned        -> owner            (if not already sent)
+//   - For Approval     -> manager          (if not already sent)
+//   - Due soon (lead)  -> owner + cc manager
+//   - Overdue          -> owner + cc manager
+// Per-task notif flags are written back so nothing is emailed twice.
 //
-// Required environment variables (Vercel -> Project -> Settings -> Environment Variables):
-//   SUPABASE_URL                e.g. https://qegyeuaeggaxxebixwsz.supabase.co
-//   SUPABASE_ANON_KEY           the anon public key
-// Optional:
-//   APPS_SCRIPT_URL             your Apps Script /exec URL (otherwise read from the
-//                               URL saved in the app's settings)
-//   CRON_SECRET                 if set, requests must include it (Vercel Cron sends it
-//                               automatically as "Authorization: Bearer <CRON_SECRET>";
-//                               external crons can pass ?key=<CRON_SECRET>)
-//   REMINDER_TIMEZONE           IANA timezone for the stored wall-clock due times.
-//                               Default "America/New_York" (handles EST/EDT automatically).
-//   REMINDER_LEAD_MIN           minutes before due to send the "almost due" reminder.
-//                               Falls back to the app's saved setting, else 60 (1 hour).
-//   APP_URL                     adds an "Open Task Board" link to the email.
+// Env vars:
+//   SUPABASE_URL, SUPABASE_ANON_KEY   (required)
+//   RESEND_API_KEY, RESEND_FROM       (required to actually send; see lib/email.js)
+//   CRON_SECRET            optional — if set, requests must include it
+//   REMINDER_TIMEZONE     default "America/New_York" (DST-aware)
+//   REMINDER_LEAD_MIN     default 120 (2 hours); falls back to the app's saved setting
+//   APP_URL               optional — adds an "Open Task Board" link
+
+import { buildTaskEmail, sendEmail } from "../lib/email.js";
 
 export default async function handler(req, res) {
-  // --- auth -----------------------------------------------------------------
   const secret = process.env.CRON_SECRET;
   if (secret) {
     const auth = req.headers["authorization"] || "";
@@ -44,8 +40,6 @@ export default async function handler(req, res) {
   }
   const TZ = process.env.REMINDER_TIMEZONE || "America/New_York";
 
-  // Convert a stored wall-clock (date + "HH:MM" in TZ) to a UTC timestamp,
-  // accounting for daylight saving automatically.
   const tzOffsetMs = (tz, date) => {
     const dtf = new Intl.DateTimeFormat("en-US", {
       timeZone: tz, hour12: false,
@@ -66,7 +60,6 @@ export default async function handler(req, res) {
   };
 
   try {
-    // --- load all rows ------------------------------------------------------
     const rowsResp = await fetch(`${SUPABASE_URL}/rest/v1/tasks?select=*`, { headers: sbHeaders });
     if (!rowsResp.ok) throw new Error("Supabase read failed: " + rowsResp.status);
     const rows = await rowsResp.json();
@@ -74,14 +67,13 @@ export default async function handler(req, res) {
     const settingsRow = rows.find((r) => r.id === "__settings__");
     const settings = (settingsRow && settingsRow.data) || {};
     const team = settings.team || [];
-    const memberFor = (name) => team.find((m) => m.name === name);
-    const appsScriptUrl = process.env.APPS_SCRIPT_URL || settings.appsScriptUrl || "";
-    const leadMin = parseInt(process.env.REMINDER_LEAD_MIN, 10) || settings.reminderLeadMin || 60;
+    const emailFor = (name, stamped) => {
+      if (stamped) return stamped;
+      const m = team.find((x) => x.name === name);
+      return (m && m.email) || "";
+    };
+    const leadMin = parseInt(process.env.REMINDER_LEAD_MIN, 10) || settings.reminderLeadMin || 120;
     const leadMs = leadMin * 60000;
-    if (!appsScriptUrl) {
-      res.status(200).json({ ok: true, sent: 0, note: "No Apps Script URL configured" });
-      return;
-    }
 
     const tasks = rows
       .filter((r) => r.id !== "__settings__" && r.data && typeof r.data === "object")
@@ -94,69 +86,61 @@ export default async function handler(req, res) {
       if (isNaN(ms)) return null;
       return ms - tzOffsetMs(TZ, new Date(ms));
     };
+    const fmt = (dateStr, timeStr) => (!dateStr ? "—" : (timeStr ? `${dateStr} ${timeStr} ET` : dateStr));
 
-    const fmt = (dateStr, timeStr) => {
-      if (!dateStr) return "—";
-      return timeStr ? `${dateStr} ${timeStr} ET` : dateStr;
-    };
-
-    // Email the owner (cc manager) via the Apps Script web app.
-    const send = async (task, kind, event) => {
-      const owner = memberFor(task.owner);
-      const manager = memberFor(task.manager);
-      const to = owner && owner.email;
-      if (!to) { console.warn("No owner email for", task.owner); return false; }
-      const payload = {
-        event,
-        subject: `${kind}: ${task.name}`,
-        to,
-        cc: (manager && manager.email) || "",
-        task: {
-          name: task.name, owner: task.owner, manager: task.manager,
-          department: task.department, priority: task.priority, status: task.status,
-          startDate: task.startDate, startTime: task.startTime,
-          dueDate: task.dueDate, dueTime: task.dueTime,
-          start: fmt(task.startDate, task.startTime),
-          due: fmt(task.dueDate, task.dueTime),
-          notes: task.notes || "",
-          link: process.env.APP_URL || "",
-        },
+    const emailTask = async (to, cc, kind, t) => {
+      if (!to) return false;
+      const fields = {
+        name: t.name, owner: t.owner, manager: t.manager,
+        department: t.department, priority: t.priority, status: t.status,
+        start: fmt(t.startDate, t.startTime), due: fmt(t.dueDate, t.dueTime),
+        notes: t.notes || "",
+        attachment: (t.attachments && t.attachments[0] && t.attachments[0].url) || "",
+        link: process.env.APP_URL || "",
       };
-      try {
-        const r = await fetch(appsScriptUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-          redirect: "follow",
-        });
-        return r.ok;
-      } catch (e) {
-        console.warn("Email send failed for " + task.owner + ":", e.message);
-        return false;
-      }
+      const { subject, html } = buildTaskEmail(kind, fields);
+      const r = await sendEmail({ to, cc, subject, html });
+      return r.ok;
     };
 
     const changed = [];
     for (const t of tasks) {
-      if (t.status === "Done" || t.status === "Recurring Done Today") continue;
-      const due = dueInstant(t);
-      if (due == null) continue;
-      const n = t.notif || (t.notif = { assigned: false, almost: false, overdue: false, lastOwner: t.owner || "" });
-      const ms = due - now;
-      if (ms <= 0) {
-        if (!n.overdue && (await send(t, "Task Overdue", "overdue"))) { n.overdue = true; changed.push(t); }
-      } else if (ms <= leadMs) {
-        if (!n.almost && (await send(t, "Task Almost Due", "almost_due"))) { n.almost = true; changed.push(t); }
+      const n = t.notif || (t.notif = { assigned: false, almost: false, overdue: false, approval: false, lastOwner: t.owner || "" });
+      if (n.approval === undefined) n.approval = false;
+      const ownerEmail = emailFor(t.owner, t.ownerEmail);
+      const managerEmail = emailFor(t.manager, t.managerEmail);
+      let didChange = false;
+
+      // Assigned -> owner
+      if (t.owner && ownerEmail && !n.assigned) {
+        if (await emailTask(ownerEmail, "", "Task Assigned", t)) { n.assigned = true; n.lastOwner = t.owner; didChange = true; }
       }
+
+      // For Approval -> manager
+      if (t.status === "For Approval" && managerEmail && !n.approval) {
+        if (await emailTask(managerEmail, "", "Task Ready For Approval", t)) { n.approval = true; didChange = true; }
+      }
+
+      // Due reminders -> owner + cc manager (skip done / approval-pending)
+      if (t.status !== "Done" && t.status !== "Recurring Done Today" && t.status !== "For Approval") {
+        const due = dueInstant(t);
+        if (due != null) {
+          const ms = due - now;
+          if (ms <= 0) {
+            if (!n.overdue && ownerEmail && (await emailTask(ownerEmail, managerEmail, "Task Overdue", t))) { n.overdue = true; didChange = true; }
+          } else if (ms <= leadMs) {
+            if (!n.almost && ownerEmail && (await emailTask(ownerEmail, managerEmail, "Task Due Soon", t))) { n.almost = true; didChange = true; }
+          }
+        }
+      }
+
+      if (didChange) changed.push({ id: t.id, data: t, updated_at: new Date().toISOString() });
     }
 
-    // --- write back changed tasks (upsert, anon key) ------------------------
     if (changed.length) {
-      const payload = changed.map((t) => ({ id: t.id, data: t, updated_at: new Date().toISOString() }));
+      const headers = Object.assign({}, sbHeaders, { Prefer: "resolution=merge-duplicates" });
       await fetch(`${SUPABASE_URL}/rest/v1/tasks?on_conflict=id`, {
-        method: "POST",
-        headers: { ...sbHeaders, Prefer: "resolution=merge-duplicates" },
-        body: JSON.stringify(payload),
+        method: "POST", headers, body: JSON.stringify(changed),
       });
     }
 

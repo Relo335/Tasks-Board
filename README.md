@@ -11,10 +11,12 @@ if Supabase is unreachable the app runs in local **demo mode** via `localStorage
 - Collapsible department sections, full task table, right-side task detail drawer
 - Calendar with department-colored pills, owner initials, "+X more", and a day drawer
 - Filter chips + dropdown filters (Department, Owner, Manager, Priority, Cadence, Status)
-- Quick actions: Ask for Update, Email Owner, Text Owner, Mark Done, Move Due Date, Edit, Delete
+- Quick actions: Ask for Update, Email Owner, Text Owner, Mark Done / Submit for Approval, Move Due Date, Edit, Delete
 - Recurring tasks auto-spawn the next occurrence (same start/due time) when marked done
+- Approval workflow: tasks flagged "Requires Approval" are submitted **For Approval** (emails the manager), and the manager marks them Done
+- File / attachment link per task (Google Drive, Dropbox, or any URL), shown on the board and in the drawer
 - Stuck Tasks (no update 3+ days / past due / blocked), Task Templates, and Reports
-- Email notifications to the owner (assigned / almost-overdue / overdue) with repeat prevention
+- Email notifications (assigned → owner; due-soon + overdue → owner & manager; approval → manager) with per-task repeat prevention
 
 ## Deploy (Vercel, static — nothing to build)
 1. Import this repo in Vercel → Add New → Project.
@@ -30,46 +32,49 @@ create the table (if needed) is in the comment at the bottom of `index.html`.
 You can also paste the Project URL + anon key in **Settings**, or set
 `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY`. The service role key is never used.
 
-## Email notifications (Google Apps Script)
-Notifications are **emailed to the task owner (cc manager)** on assign,
-almost-overdue (1 hour before due, by default), and overdue. The owner/manager
-emails come from the Team Directory. Sending is done by your **Google Apps Script
-web app**: the browser posts through the same-origin proxy `api/notify.js` (to
-avoid CORS) and the cron (`api/cron-reminders.js`) posts to the Apps Script URL
-directly. Repeat sends are prevented (tracked per task).
+## Email notifications (Resend serverless function)
+Emails are sent by the serverless function **`api/send-email.js`** (shared helper
+`lib/email.js`) using **Resend**. The browser never holds an API key — it POSTs the
+recipients + task fields to `/api/send-email`, which sends the message. Triggers:
 
-### Deploy the Apps Script web app
-1. Open your Apps Script project (or **Extensions → Apps Script** from a Sheet).
-   Paste the `doPost(e)` function shown in the comment at the bottom of `index.html`.
-2. **Deploy → New deployment → Web app** → *Execute as:* **Me** → *Who has access:*
-   **Anyone** → **Deploy** → copy the **Web app URL** (ends in `/exec`).
-3. In the app: **Settings → Email Notifications** → paste that `/exec` URL →
-   set the reminder timing (default 1 hour) → **Save** → **Send test email**.
-4. Fill in each person's **Email** in **Settings → Team Directory** (required to
-   receive notifications), then **Save team**.
+| Event | Recipient | Tracking flag |
+|---|---|---|
+| Task assigned (new owner / owner change) | owner | `notif.assigned` |
+| Due soon (2 hours before, by default) | owner + cc manager | `notif.almost` |
+| Overdue | owner + cc manager | `notif.overdue` |
+| Marked **For Approval** | manager | `notif.approval` |
 
-### Vercel env vars (Project → Settings → Environment Variables)
-- `SUPABASE_URL` and `SUPABASE_ANON_KEY` (required; service role is never used)
-- `APPS_SCRIPT_URL` — your Apps Script `/exec` URL (used by the cron; otherwise the
-  cron reads the URL saved in the app's settings)
-- `CRON_SECRET` (recommended — pass it as `?key=` when calling the cron endpoint)
-- `REMINDER_TIMEZONE` (default `America/New_York` — DST-aware, so Eastern times are
-  always correct; change only if the team is in another timezone)
-- `REMINDER_LEAD_MIN` (minutes before due for the "almost due" reminder; default `60`)
-- `APP_URL` (optional — adds an "Open Task Board" link to the email)
+All flags live inside each task's `data` JSON, so reminders are never sent twice.
+While the board is open the app checks every ~60s; `api/cron-reminders.js` covers
+the same logic on a schedule so emails fire even when nobody has the board open.
 
-In-app reminders are checked every ~60s while someone has the board open; the cron
-covers the rest. Assigned-task emails fire instantly from the app.
+### Set up Resend
+1. Create a free account at [resend.com](https://resend.com) and add an **API key**.
+2. To email anyone other than yourself, **verify a sending domain** in Resend.
+3. In Vercel → Project → Settings → **Environment Variables**, add:
+   - `RESEND_API_KEY` = `re_…`
+   - `RESEND_FROM` = `Task Board <tasks@yourdomain.com>` (a verified sender; defaults
+     to Resend's `onboarding@resend.dev`, which only delivers to your own account)
+4. In the app → **Settings → Team & Email Addresses**, enter each owner's and
+   manager's email, **Save team**, then click **Send test email**.
 
-### 24/7 reminders (cron) — fire 1 hour before due
-`api/cron-reminders.js` runs server-side so reminders fire even when nobody has the
-board open. The `vercel.json` cron runs once per day (the max on Vercel's free Hobby
-plan), kept only as a backstop. For true 1-hour-before timing you need a check every
-~15 minutes:
-- **Free (any plan):** create a free job at https://cron-job.org that GETs
-  `https://YOUR-SITE/api/cron-reminders?key=YOUR_CRON_SECRET` every 15 minutes.
-- **Vercel Pro:** change the schedule in `vercel.json` to `*/15 * * * *` (every 15 min);
-  Vercel Cron sends the secret automatically.
+> Prefer SendGrid or another provider? Swap the one `fetch` call inside
+> `lib/email.js` (`https://api.resend.com/emails`) for that provider's API — the
+> rest of the app is unchanged.
+
+### Cron (so due-soon / overdue fire when the board is closed)
+`api/cron-reminders.js` reads Supabase and sends via Resend. Env vars:
+`SUPABASE_URL`, `SUPABASE_ANON_KEY`, `RESEND_API_KEY`, `RESEND_FROM`, optional
+`CRON_SECRET`, `REMINDER_TIMEZONE` (default `America/New_York`), `REMINDER_LEAD_MIN`
+(default `120`), `APP_URL`. The `vercel.json` cron is a daily backstop; for true
+2-hours-before timing, hit `https://YOUR-SITE/api/cron-reminders?key=CRON_SECRET`
+every ~15 min (free via cron-job.org, or Vercel Pro `*/15 * * * *`).
+
+### Managers & approval
+The manager dropdown uses a fixed list: **Sammy, Lisa, Dyana, Leo, Dawn, Rob**
+(seeded in the Team directory so you can set their emails). When a task has
+**Requires Approval = Yes**, "Mark Done" instead submits it **For Approval** and
+emails the manager; the manager then marks it Done.
 
 ## Notes
 - Each person sets their own name (top-right profile) — greeting and "My Tasks" are per-device.

@@ -149,6 +149,7 @@
   .s-prog{background:#15324f;color:#7fb6f0}
   .s-wait{background:#3a3417;color:#e7cf6b}
   .s-block{background:var(--red-soft);color:#ff8a8a}
+  .s-approval{background:#3a2a14;color:#f5c542}
   .s-done{background:#143526;color:#5fd49b}
   .s-rec{background:#1f2f47;color:#8fb8e8}
   .pr{font-size:11px;font-weight:700;padding:2px 9px;border-radius:6px}
@@ -301,11 +302,13 @@ const DEPT_HEX = {
   Sales:"#f5c542", Managers:"#f0588b", Marketing:"#a06bff",
   Operations:"#4a90e2", Finance:"#3ec98a", Admin:"#8b95a5", Personal:"#d7dce3"
 };
-const STATUSES = ["To Do","In Progress","Waiting on Someone","Blocked","Done","Recurring Done Today"];
+const STATUSES = ["To Do","In Progress","Waiting on Someone","Blocked","For Approval","Done","Recurring Done Today"];
 const STATUS_CLASS = {
   "To Do":"s-todo","In Progress":"s-prog","Waiting on Someone":"s-wait",
-  "Blocked":"s-block","Done":"s-done","Recurring Done Today":"s-rec"
+  "Blocked":"s-block","For Approval":"s-approval","Done":"s-done","Recurring Done Today":"s-rec"
 };
+/* Manager dropdown uses this exact list */
+const MANAGERS = ["Sammy","Lisa","Dyana","Leo","Dawn","Rob"];
 const PRIORITIES = ["Critical","High","Normal","Low"];
 const CADENCES = ["None","Daily","Weekly","Monthly"];
 const REMINDER_OPTIONS = [
@@ -335,14 +338,15 @@ const TEMPLATES = [
    checklist:["Gather department metrics","Compile report","Review with leadership","Send to team"]}
 ];
 
-/* Sample team directory (editable in Settings) */
+/* Team directory (editable in Settings). The six managers are seeded so their
+   email addresses can be entered; owners can be added as needed. */
 const DEFAULT_TEAM = [
-  {name:"Robert", department:"Managers", role:"Manager", email:"robert@usrelocators.com", phone:""},
-  {name:"Sales Lead", department:"Sales", role:"", email:"", phone:""},
-  {name:"Marketing Lead", department:"Marketing", role:"", email:"", phone:""},
-  {name:"Operations Lead", department:"Operations", role:"", email:"", phone:""},
-  {name:"Finance Lead", department:"Finance", role:"", email:"", phone:""},
-  {name:"Admin Lead", department:"Admin", role:"", email:"", phone:""}
+  {name:"Sammy", department:"Managers", role:"Manager", email:"", phone:""},
+  {name:"Lisa", department:"Managers", role:"Manager", email:"", phone:""},
+  {name:"Dyana", department:"Managers", role:"Manager", email:"", phone:""},
+  {name:"Leo", department:"Managers", role:"Manager", email:"", phone:""},
+  {name:"Dawn", department:"Managers", role:"Manager", email:"", phone:""},
+  {name:"Rob", department:"Managers", role:"Manager", email:"robert@usrelocators.com", phone:""}
 ];
 
 /* ---- State ----------------------------------------------------------------- */
@@ -351,9 +355,8 @@ const state = {
   cfg: {
     supabaseUrl: DEFAULT_SUPABASE_URL,
     supabaseAnon: DEFAULT_SUPABASE_ANON,
-    appsScriptUrl: "",
-    emailEndpoint: "/api/notify",
-    reminderLeadMin: 60,
+    emailEndpoint: "/api/send-email",
+    reminderLeadMin: 120,
     team: DEFAULT_TEAM.slice()
   },
   user: "",
@@ -380,7 +383,7 @@ function toast(msg){ const t=$("#toast"); t.textContent=msg; t.classList.add("sh
 function dueDateTime(t){ if(!t.dueDate) return null; return new Date(t.dueDate + "T" + (t.dueTime || "23:59")); }
 function startDateTime(t){ if(!t.startDate) return null; return new Date(t.startDate + "T" + (t.startTime || "00:00")); }
 function isOverdue(t){
-  if(t.status==="Done" || t.status==="Recurring Done Today") return false;
+  if(t.status==="Done" || t.status==="Recurring Done Today" || t.status==="For Approval") return false;
   const d = dueDateTime(t); if(!d) return false;
   return d.getTime() < Date.now();
 }
@@ -413,9 +416,12 @@ function contactFor(name){ return (state.cfg.team||[]).find(m=>m.name===name) ||
 function loadConfig(){
   try{ Object.assign(state.cfg, JSON.parse(localStorage.getItem(LS.cfg)||"{}")); }catch(e){}
   if(!state.cfg.team || !state.cfg.team.length) state.cfg.team = DEFAULT_TEAM.slice();
+  // Ensure the six managers always exist so their emails can be entered.
+  MANAGERS.forEach(mn=>{ if(!state.cfg.team.some(m=>m.name===mn)) state.cfg.team.push({name:mn, department:"Managers", role:"Manager", email:"", phone:""}); });
   if(!state.cfg.supabaseUrl) state.cfg.supabaseUrl = DEFAULT_SUPABASE_URL;
   if(!state.cfg.supabaseAnon) state.cfg.supabaseAnon = DEFAULT_SUPABASE_ANON;
-  if(!state.cfg.emailEndpoint) state.cfg.emailEndpoint = "/api/notify";
+  if(!state.cfg.emailEndpoint || state.cfg.emailEndpoint==="/api/notify") state.cfg.emailEndpoint = "/api/send-email";
+  if(!state.cfg.reminderLeadMin) state.cfg.reminderLeadMin = 120;
   state.user = localStorage.getItem(LS.user) || "";
   try{ state.collapsed = JSON.parse(localStorage.getItem(LS.collapsed)||"{}"); }catch(e){ state.collapsed={}; }
 }
@@ -444,16 +450,25 @@ async function loadTasks(){
       .map(r => ({...r.data, id:r.id}));
     const cfgRow = (data||[]).find(r=>r.id==="__settings__");
     if(cfgRow && cfgRow.data){
-      ["appsScriptUrl","emailEndpoint","reminderLeadMin","team"].forEach(k=>{
+      ["emailEndpoint","reminderLeadMin","team"].forEach(k=>{
         if(cfgRow.data[k]!=null) state.cfg[k]=cfgRow.data[k];
       });
+      MANAGERS.forEach(mn=>{ if(!state.cfg.team.some(m=>m.name===mn)) state.cfg.team.push({name:mn, department:"Managers", role:"Manager", email:"", phone:""}); });
     }
   }else{
     try{ state.tasks = JSON.parse(localStorage.getItem(LS.demo)||"[]"); }catch(e){ state.tasks=[]; }
   }
 }
 
+/* Stamp owner/manager emails onto the task so any consumer (the Apps Script
+   notifier, or the cron) can address both without a directory lookup. */
+function stampContacts(t){
+  const o = contactFor(t.owner), m = contactFor(t.manager);
+  t.ownerEmail = (o && o.email) || "";
+  t.managerEmail = (m && m.email) || "";
+}
 async function persistTask(t){
+  stampContacts(t);
   t.updatedAt = new Date().toISOString();
   if(state.mode==="live" && state.sb){
     const {error} = await state.sb.from("tasks").upsert(
@@ -473,7 +488,6 @@ async function deleteTaskRemote(id){
 }
 async function persistSharedSettings(){
   const shared = {
-    appsScriptUrl: state.cfg.appsScriptUrl,
     emailEndpoint: state.cfg.emailEndpoint,
     reminderLeadMin: state.cfg.reminderLeadMin,
     team: state.cfg.team
@@ -484,46 +498,50 @@ async function persistSharedSettings(){
   }
 }
 
-/* ---- Email notifications (Google Apps Script web app) --------------------- */
-/* Notifications are emailed to the task owner (cc manager) by posting a JSON
-   payload to a Google Apps Script web app (the URL you deploy, ending in /exec).
-   The browser posts through the same-origin proxy /api/notify to avoid CORS; the
-   cron posts to the Apps Script URL directly. Owner/manager emails come from the
-   team directory. If no Apps Script URL or owner email is set, we no-op. */
-function notifyPayload(task, kind, event){
-  const owner = contactFor(task.owner);
-  const manager = contactFor(task.manager);
+/* ---- Email notifications (Resend serverless function) --------------------- */
+/* Emails are sent by the serverless function /api/send-email (which holds the
+   email-provider API key). The browser posts the recipient(s) + task fields; the
+   function builds and delivers the message. Owner/manager emails come from the
+   team directory (and are also stamped on each task as ownerEmail/managerEmail).
+   Sending happens on: assignment (owner), due-soon + overdue (owner + cc manager),
+   and "For Approval" (manager). Repeat sends are prevented via the notif flags. */
+function taskEmailFields(task){
   return {
-    event,
-    subject: `${kind}: ${task.name}`,
-    to: (owner && owner.email) || "",
-    cc: (manager && manager.email) || "",
-    task: {
-      name: task.name, owner: task.owner, manager: task.manager,
-      department: task.department, priority: task.priority, status: task.status,
-      startDate: task.startDate, startTime: task.startTime,
-      dueDate: task.dueDate, dueTime: task.dueTime,
-      start: fmtDateTime(task.startDate, task.startTime),
-      due: fmtDateTime(task.dueDate, task.dueTime),
-      notes: task.notes || "",
-      link: location.origin + location.pathname
-    }
+    name: task.name, owner: task.owner, manager: task.manager,
+    department: task.department, priority: task.priority, status: task.status,
+    start: fmtDateTime(task.startDate, task.startTime),
+    due: fmtDateTime(task.dueDate, task.dueTime),
+    notes: task.notes || "",
+    attachment: (task.attachments && task.attachments[0] && (task.attachments[0].url||"")) || "",
+    link: location.origin + location.pathname
   };
 }
-async function sendEmail(task, kind, event){
-  const url = state.cfg.appsScriptUrl;
-  if(!url) return false;
-  const payload = notifyPayload(task, kind, event);
-  if(!payload.to){ console.warn("No owner email for", task.owner); return false; }
+async function postEmail(payload){
   try{
-    const r = await fetch(state.cfg.emailEndpoint || "/api/notify", {
+    const r = await fetch(state.cfg.emailEndpoint || "/api/send-email", {
       method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({url, payload})});
+      body: JSON.stringify(payload)});
     return r.ok;
-  }catch(e){ console.warn("Email notify failed:", e.message||e); return false; }
+  }catch(e){ console.warn("Email send failed:", e.message||e); return false; }
+}
+/* event: "assigned" | "almost_due" | "overdue" | "approval" | "test" */
+async function sendEmail(task, kind, event){
+  const owner = contactFor(task.owner);
+  const manager = contactFor(task.manager);
+  const ownerEmail = (owner && owner.email) || task.ownerEmail || "";
+  const managerEmail = (manager && manager.email) || task.managerEmail || "";
+  let to = ownerEmail, cc = "";
+  if(event==="almost_due" || event==="overdue") cc = managerEmail;
+  if(event==="approval"){ to = managerEmail; cc = ""; }   // approval goes to the manager
+  if(!to){ console.warn("No recipient email for", event, task.name); return false; }
+  return await postEmail({ to, cc, kind, event, task: taskEmailFields(task) });
 }
 
-function ensureNotif(t){ if(!t.notif) t.notif = {assigned:false, almost:false, overdue:false, lastOwner:t.owner||""}; return t.notif; }
+function ensureNotif(t){
+  if(!t.notif) t.notif = {assigned:false, almost:false, overdue:false, approval:false, lastOwner:t.owner||""};
+  if(t.notif.approval===undefined) t.notif.approval=false;
+  return t.notif;
+}
 
 async function notifyAssigned(t, reason){
   const n = ensureNotif(t);
@@ -533,20 +551,27 @@ async function notifyAssigned(t, reason){
   if(ok){ n.assigned = true; n.lastOwner = t.owner; }
 }
 
-/* Periodic scan for almost-overdue + overdue notifications (prevents repeats) */
+/* Email the manager once when a task enters "For Approval". */
+async function notifyApproval(t){
+  const n = ensureNotif(t);
+  if(t.status!=="For Approval" || n.approval) return;
+  const ok = await sendEmail(t, "Task Ready For Approval", "approval");
+  if(ok) n.approval = true;
+}
+
+/* Periodic scan for due-soon (2h) + overdue notifications (prevents repeats) */
 async function notificationScan(){
-  if(!state.cfg.appsScriptUrl) return;
-  const lead = (state.cfg.reminderLeadMin||60) * 60000;
+  const lead = (state.cfg.reminderLeadMin||120) * 60000;
   let changed=false;
   for(const t of state.tasks){
-    if(t.status==="Done"||t.status==="Recurring Done Today") continue;
+    if(t.status==="Done"||t.status==="Recurring Done Today"||t.status==="For Approval") continue;
     const d = dueDateTime(t); if(!d) continue;
     const n = ensureNotif(t);
     const ms = d.getTime() - Date.now();
     if(ms <= 0){
       if(!n.overdue){ const ok=await sendEmail(t,"Task Overdue","overdue"); if(ok){n.overdue=true; changed=true; await persistTask(t);} }
     }else if(ms <= lead){
-      if(!n.almost){ const ok=await sendEmail(t,"Task Almost Due","almost_due"); if(ok){n.almost=true; changed=true; await persistTask(t);} }
+      if(!n.almost){ const ok=await sendEmail(t,"Task Due Soon","almost_due"); if(ok){n.almost=true; changed=true; await persistTask(t);} }
     }
   }
   if(changed) render();
@@ -556,11 +581,11 @@ async function notificationScan(){
 function blankTask(){
   return {
     id:uid(), name:"", owner:"", manager:"", department:"Operations",
-    priority:"Normal", status:"To Do",
+    priority:"Normal", status:"To Do", requiresApproval:false,
     startDate:todayStr(), startTime:"09:00", dueDate:todayStr(), dueTime:"17:00",
     cadence:"None", lastUpdate:new Date().toISOString(), notes:"",
-    links:[], comments:[], checklist:[], activity:[],
-    notif:{assigned:false,almost:false,overdue:false,lastOwner:""},
+    links:[], attachments:[], comments:[], checklist:[], activity:[],
+    notif:{assigned:false,almost:false,overdue:false,approval:false,lastOwner:""},
     createdAt:new Date().toISOString(), completedAt:null
   };
 }
@@ -569,14 +594,20 @@ function addActivity(t, text){ (t.activity = t.activity||[]).unshift({ts:new Dat
 async function saveTask(t, {isNew}={}){
   const existing = state.tasks.find(x=>x.id===t.id);
   const prevOwner = existing ? existing.owner : null;
+  const prevStatus = existing ? existing.status : null;
   t.lastUpdate = new Date().toISOString();
   if(isNew){ addActivity(t, "Task created"); state.tasks.push(t); }
   else { Object.assign(existing, t); t = existing; }
+  const n = ensureNotif(t);
+  // Re-arm the "For Approval" email if the task was re-opened to an active state.
+  if(t.status!=="For Approval" && t.status!=="Done" && t.status!=="Recurring Done Today") n.approval=false;
   await persistTask(t);
   if(isNew && t.owner){ await notifyAssigned(t, "created"); await persistTask(t); }
   else if(!isNew && t.owner && t.owner!==prevOwner){
-    ensureNotif(t).assigned=false; await notifyAssigned(t,"changed"); await persistTask(t);
+    n.assigned=false; await notifyAssigned(t,"changed"); await persistTask(t);
   }
+  // Email the manager when a task enters "For Approval".
+  if(t.status==="For Approval" && prevStatus!=="For Approval"){ await notifyApproval(t); await persistTask(t); }
   render();
 }
 
@@ -589,7 +620,7 @@ function nextOccurrence(t){
   clone.createdAt = new Date().toISOString();
   clone.comments = []; clone.activity = [];
   delete clone._spawned;
-  clone.notif = {assigned:false, almost:false, overdue:false, lastOwner:t.owner||""};
+  clone.notif = {assigned:false, almost:false, overdue:false, approval:false, lastOwner:t.owner||""};
   (clone.checklist||[]).forEach(c=>c.done=false);
   const shift = (dateStr, unit)=>{
     if(!dateStr) return dateStr;
@@ -607,6 +638,11 @@ function nextOccurrence(t){
 }
 
 async function markDone(t){
+  // Approval workflow: an approval-required task is first submitted "For Approval"
+  // (which emails the manager); the manager then marks it Done/Completed.
+  if(t.requiresApproval && t.status!=="For Approval" && t.status!=="Done" && t.status!=="Recurring Done Today"){
+    return submitForApproval(t);
+  }
   const wasRecurring = t.cadence && t.cadence!=="None";
   const alreadySpawned = t._spawned;
   t.status = wasRecurring ? "Recurring Done Today" : "Done";
@@ -628,6 +664,20 @@ async function markDone(t){
   render();
 }
 
+/* Owner submits an approval-required task; emails the manager for review. */
+async function submitForApproval(t){
+  t.status = "For Approval";
+  t.lastUpdate = new Date().toISOString();
+  ensureNotif(t).approval = false;
+  addActivity(t, "Submitted for approval");
+  await persistTask(t);
+  await notifyApproval(t);
+  await persistTask(t);
+  const mgr = contactFor(t.manager);
+  toast(mgr && mgr.email ? `Sent to ${t.manager||'manager'} for approval` : "Marked For Approval (add the manager's email in Settings to notify)");
+  render();
+}
+
 async function deleteTask(id){
   if(!confirm("Delete this task? This cannot be undone.")) return;
   state.tasks = state.tasks.filter(t=>t.id!==id);
@@ -639,8 +689,8 @@ async function deleteTask(id){
 async function quickAskUpdate(t){
   addActivity(t, "Update requested");
   await persistTask(t);
-  const ok = await sendEmail(t, "Update Requested", "update_requested");
-  toast(ok ? "Update request emailed to owner" : "Logged update request (set the Apps Script URL in Settings to email)");
+  const ok = await sendEmail(t, "Update Requested", "update");
+  toast(ok ? "Update request emailed to owner" : "Logged update request (add emails + RESEND_API_KEY to send)");
   render();
 }
 function quickEmail(t){
@@ -716,7 +766,7 @@ function isCompletedThisWeek(t){
   return new Date(t.completedAt) >= monday;
 }
 function ownersList(){ return [...new Set(state.tasks.map(t=>t.owner).filter(Boolean).concat((state.cfg.team||[]).map(m=>m.name)))].sort(); }
-function managersList(){ return [...new Set(state.tasks.map(t=>t.manager).filter(Boolean).concat((state.cfg.team||[]).filter(m=>/manager/i.test(m.role||"")||m.department==="Managers").map(m=>m.name)))].sort(); }
+function managersList(){ return [...new Set([...MANAGERS, ...state.tasks.map(t=>t.manager).filter(Boolean)])]; }
 
 /* ===========================================================================
    RENDER
@@ -835,7 +885,7 @@ function taskRow(t){
     ? `<div class="due"><span>${fmtDateTime(t.startDate,'')}</span><span class="tm">${fmtTime(t.startTime)}</span></div>`
     : '<span style="color:var(--muted2)">—</span>';
   return `<tr data-open="${t.id}">
-    <td><div class="tname">${esc(t.name)}${od?' <span class="overdue-txt">●</span>':''}<div class="od">${esc(t.department)}</div></div></td>
+    <td><div class="tname">${esc(t.name)}${od?' <span class="overdue-txt">●</span>':''}${t.requiresApproval?' <span title="Requires approval">🛡️</span>':''}${(t.attachments&&t.attachments.length)?` <a href="${esc(t.attachments[0].url||'#')}" target="_blank" rel="noreferrer" title="${esc(t.attachments[0].name||'Attachment')}" onclick="event.stopPropagation()">📎</a>`:''}<div class="od">${esc(t.department)}</div></div></td>
     <td><div class="ownercell">${ownerAv(t.owner)}<span>${esc(t.owner||'—')}</span></div></td>
     <td>${esc(t.manager||'—')}</td>
     <td>${prPill(t.priority)}</td>
@@ -1147,20 +1197,19 @@ function viewSettings(){
   </div>
   <div class="card sect" style="margin-bottom:16px">
     <h2>📧 Email Notifications</h2>
-    <div class="sub" style="margin-bottom:12px">Emails the task <b>owner</b> (cc <b>manager</b>) on: <b>task assigned</b>, <b>almost overdue</b> (1 hour before due, by default), and <b>overdue</b>. Repeat sends are prevented (tracked inside each task's data). The owner's email comes from the Team Directory below.</div>
-    <div class="hint" style="margin-bottom:12px">📨 Sending is handled by your <b>Google Apps Script web app</b>. Paste its deployed <b>Web App URL</b> (ends in <code class="k">/exec</code>) below. The matching <code class="k">doPost</code> script and deploy steps are in the README.</div>
+    <div class="sub" style="margin-bottom:12px">Emails the <b>owner</b> when a task is assigned, the <b>owner + cc manager</b> when a task is due soon (2 hours before, by default) and when overdue, and the <b>manager</b> when a task is marked <b>For Approval</b>. Repeat sends are prevented (tracked inside each task's data). Addresses come from the Team Directory below.</div>
+    <div class="hint" style="margin-bottom:12px">📨 Sending is handled by the serverless function <code class="k">/api/send-email</code>, which holds the email-provider key (e.g. Resend) as a Vercel env var <code class="k">RESEND_API_KEY</code>. No API key is stored in this page. See the README for the function code and setup.</div>
     <div class="form-grid">
-      <div class="fld full"><label>Apps Script Web App URL</label><input id="asUrl" value="${esc(state.cfg.appsScriptUrl)}" placeholder="https://script.google.com/macros/s/…/exec"/></div>
-      <div class="fld"><label>Almost-overdue reminder timing</label><select id="gcLead">${r}</select></div>
+      <div class="fld"><label>Due-soon reminder timing</label><select id="gcLead">${r}</select></div>
     </div>
     <div style="margin-top:12px"><button class="btn primary" id="saveGc">Save notifications</button> <button class="btn" id="testGc">Send test email</button></div>
   </div>
   <div class="card sect">
-    <h2>👥 Team Directory</h2>
-    <div class="sub" style="margin-bottom:10px">Powers owner/manager pickers, department chips, Email/Text quick actions, and email notifications (owner email).</div>
+    <h2>👥 Team &amp; Email Addresses</h2>
+    <div class="sub" style="margin-bottom:10px">Enter and save the <b>email address</b> for each owner and manager. These are the addresses used for assignment, due-soon, overdue, and approval emails. The six managers are listed; add owners with the button below.</div>
     <div style="overflow-x:auto"><table class="members-tbl"><thead><tr><th>Name</th><th>Department</th><th>Role</th><th>Email</th><th>Phone</th><th></th></tr></thead>
     <tbody>${team}</tbody></table></div>
-    <div class="hint" style="margin-top:8px">A member's <b>Email</b> is required for them to receive task notifications.</div>
+    <div class="hint" style="margin-top:8px">A member's <b>Email</b> is required for them to receive notifications. Manager dropdown: ${MANAGERS.join(", ")}.</div>
     <div style="margin-top:12px"><button class="btn sm" id="addMember">＋ Add member</button> <button class="btn sm primary" id="saveTeam">Save team</button></div>
   </div>`;
 }
@@ -1171,15 +1220,14 @@ function bindSettings(c){
     saveConfig(); await connect(); await loadTasks(); toast(state.mode==='live'?"Connected to Supabase":"Could not connect — demo mode"); render();
   };
   $("#saveGc").onclick=async()=>{
-    state.cfg.appsScriptUrl=$("#asUrl").value.trim();
-    state.cfg.reminderLeadMin=parseInt($("#gcLead").value,10)||60;
+    state.cfg.reminderLeadMin=parseInt($("#gcLead").value,10)||120;
     saveConfig(); await persistSharedSettings(); toast("Notification settings saved");
   };
   $("#testGc").onclick=async()=>{
-    state.cfg.appsScriptUrl=$("#asUrl").value.trim(); saveConfig();
     const me=contactFor(state.user);
-    const ok=await sendEmail({name:"Test notification",owner:state.user,manager:"",department:"Operations",priority:"Normal",status:"To Do",startDate:todayStr(),startTime:"09:00",dueDate:todayStr(),dueTime:"17:00"},"Test Notification","test");
-    toast(ok?"Test email sent to "+((me&&me.email)||"owner"):"Test failed — set the Apps Script URL and your own email in the directory");
+    if(!me || !me.email){ toast("Add your name + email in the directory below first"); return; }
+    const ok=await sendEmail({name:"Test notification",owner:state.user,manager:"",department:"Operations",priority:"Normal",status:"To Do",startDate:todayStr(),startTime:"09:00",dueDate:todayStr(),dueTime:"17:00",attachments:[]},"Test Notification","test");
+    toast(ok?"Test email sent to "+me.email:"Test failed — confirm RESEND_API_KEY is set on the server");
   };
   c.querySelectorAll("[data-team]").forEach(el=>el.onchange=()=>{ state.cfg.team[+el.dataset.i][el.dataset.team]=el.value; });
   c.querySelectorAll("[data-teamdel]").forEach(el=>el.onclick=()=>{ state.cfg.team.splice(+el.dataset.teamdel,1); saveConfig(); renderContent(); });
@@ -1226,7 +1274,9 @@ function renderTaskDrawer(){
         <button class="btn sm" data-q="ask">💬 Ask for Update</button>
         <button class="btn sm" data-q="email">✉ Email Owner</button>
         <button class="btn sm" data-q="text">📱 Text Owner</button>
-        <button class="btn sm" data-q="done">✓ Mark Done</button>
+        ${(t.requiresApproval && t.status!=="For Approval" && t.status!=="Done" && t.status!=="Recurring Done Today")
+          ? '<button class="btn sm" data-q="approval">🛡️ Submit for Approval</button>'
+          : '<button class="btn sm" data-q="done">✓ Mark '+((t.status==="For Approval")?"Approved / Done":"Done")+'</button>'}
         <button class="btn sm" data-q="move">📅 Move Due Date</button>
         <button class="btn sm" data-q="edit">✎ Edit</button>
         <button class="btn sm danger" data-q="del" style="grid-column:1/-1">🗑 Delete Task</button>
@@ -1237,20 +1287,28 @@ function renderTaskDrawer(){
         ${meta("Department", esc(t.department))}
         ${meta("Priority", prPill(t.priority))}
         ${meta("Status", statusPill(t.status))}
+        ${meta("Requires Approval", t.requiresApproval?'🛡️ Yes':'No')}
         ${meta("Cadence", t.cadence&&t.cadence!=='None'?'↻ '+esc(t.cadence):'—')}
         ${meta("Start", fmtDateTime(t.startDate,t.startTime))}
         ${meta("Due", `<span class="${od?'overdue-txt':''}">${fmtDateTime(t.dueDate,t.dueTime)}</span>`)}
         ${meta("Last Update", t.lastUpdate?fmtFull(t.lastUpdate):'—')}
-        ${meta("Created", t.createdAt?fmtFull(t.createdAt):'—')}
       </div>
+
+      ${(t.requiresApproval && t.status==="For Approval")?`<div class="banner" style="border-color:#5a4d1f;background:#1f1c10;color:#e7cf6b;margin-bottom:18px">⏳ Awaiting manager approval${t.manager?' by '+esc(t.manager):''}. The manager marks this Approved / Done.</div>`:''}
 
       <div class="dsec">
         <div class="ht">Notes</div>
         <textarea class="notes-ta" id="dNotes" placeholder="Add notes…">${esc(t.notes||'')}</textarea>
       </div>
 
+      <div class="dsec att">
+        <div class="ht">📎 File / Attachment</div>
+        ${(t.attachments||[]).map((a,i)=>`<div class="linkrow">📎 ${a.url?`<a href="${esc(a.url)}" target="_blank" rel="noreferrer">${esc(a.name||a.url)}</a>`:esc(a.name||'(no link)')}${a.notes?` <span class="sub" style="color:var(--muted2)">— ${esc(a.notes)}</span>`:''}<button class="micro del" data-attdel="${i}" style="margin-left:auto">✕</button></div>`).join("")||'<div class="sub" style="color:var(--muted2)">No file/attachment yet.</div>'}
+        <div class="add"><input id="attName" placeholder="File name"/><input id="attUrl" placeholder="Google Drive / Dropbox / file URL"/><button class="btn sm" id="attAdd">Add</button></div>
+      </div>
+
       <div class="dsec lnk">
-        <div class="ht">Attachments / Links</div>
+        <div class="ht">Other Links</div>
         ${(t.links||[]).map((l,i)=>`<div class="linkrow">🔗 <a href="${esc(l.url)}" target="_blank" rel="noreferrer">${esc(l.label||l.url)}</a><button class="micro del" data-linkdel="${i}" style="margin-left:auto">✕</button></div>`).join("")||'<div class="sub" style="color:var(--muted2)">No links yet.</div>'}
         <div class="add"><input id="lnkLabel" placeholder="Label"/><input id="lnkUrl" placeholder="https://…"/><button class="btn sm" id="lnkAdd">Add</button></div>
       </div>
@@ -1280,6 +1338,7 @@ function renderTaskDrawer(){
     if(q==="ask") quickAskUpdate(t).then(reopen);
     else if(q==="email") quickEmail(t);
     else if(q==="text") quickText(t);
+    else if(q==="approval") submitForApproval(t).then(reopen);
     else if(q==="done") markDone(t).then(reopen);
     else if(q==="move") moveDueDate(t).then(reopen);
     else if(q==="edit"){ closeDrawer(); openTaskModal(t); }
@@ -1288,6 +1347,9 @@ function renderTaskDrawer(){
 
   const notes=$("#dNotes");
   notes.onblur=async()=>{ if((t.notes||"")!==notes.value){ t.notes=notes.value; addActivity(t,"Updated notes"); t.lastUpdate=new Date().toISOString(); await persistTask(t); } };
+
+  $("#attAdd").onclick=async()=>{ const u=$("#attUrl").value.trim(), nm=$("#attName").value.trim(); if(!u&&!nm)return; (t.attachments=t.attachments||[]).push({name:nm||u,url:u,notes:""}); addActivity(t,"Added a file/attachment"); await persistTask(t); renderTaskDrawer(); render(); };
+  $("#drawerEl").querySelectorAll("[data-attdel]").forEach(el=>el.onclick=async()=>{ t.attachments.splice(+el.dataset.attdel,1); await persistTask(t); renderTaskDrawer(); render(); });
 
   $("#lnkAdd").onclick=async()=>{ const u=$("#lnkUrl").value.trim(); if(!u)return; (t.links=t.links||[]).push({label:$("#lnkLabel").value.trim(),url:u}); addActivity(t,"Added a link"); await persistTask(t); renderTaskDrawer(); };
   $("#drawerEl").querySelectorAll("[data-linkdel]").forEach(el=>el.onclick=async()=>{ t.links.splice(+el.dataset.linkdel,1); await persistTask(t); renderTaskDrawer(); });
@@ -1345,7 +1407,10 @@ function renderModal(){
 function renderTaskModal(){
   const t=state.modal.task, isNew=state.modal.isNew;
   const opt=(arr,val)=>arr.map(o=>`<option ${val===o?'selected':''}>${esc(o)}</option>`).join("");
-  const owners=ownersList(), managers=managersList();
+  const owners=ownersList();
+  // Manager dropdown uses the fixed MANAGERS list (plus the current value if custom).
+  const mgrOpts=[...new Set([...(t.manager?[t.manager]:[]), ...MANAGERS])];
+  const att=(t.attachments && t.attachments[0]) || {name:"",url:"",notes:""};
   const root=$("#modal-root");
   root.innerHTML=`
   <div class="modal show"><div class="box">
@@ -1356,14 +1421,17 @@ function renderTaskModal(){
       <div class="fld full"><label>Task name</label><input id="f_name" value="${esc(t.name)}" placeholder="e.g. Run weekly payroll"/></div>
       <div class="fld"><label>Owner</label><input id="f_owner" list="ownerList" value="${esc(t.owner)}" placeholder="Assign to…"/>
         <datalist id="ownerList">${owners.map(o=>`<option value="${esc(o)}"></option>`).join("")}</datalist></div>
-      <div class="fld"><label>Manager</label><input id="f_manager" list="mgrList" value="${esc(t.manager)}" placeholder="Reports to…"/>
-        <datalist id="mgrList">${managers.map(o=>`<option value="${esc(o)}"></option>`).join("")}</datalist></div>
+      <div class="fld"><label>Manager</label><select id="f_manager"><option value="">— Select —</option>${mgrOpts.map(o=>`<option ${t.manager===o?'selected':''}>${esc(o)}</option>`).join("")}</select></div>
       <div class="fld"><label>Department</label><select id="f_department">${opt(DEPARTMENTS,t.department)}</select></div>
       <div class="fld"><label>Priority</label><select id="f_priority">${opt(PRIORITIES,t.priority)}</select></div>
       <div class="fld"><label>Status</label><select id="f_status">${opt(STATUSES,t.status)}</select></div>
       <div class="fld"><label>Cadence</label><select id="f_cadence">${opt(CADENCES,t.cadence)}</select></div>
+      <div class="fld"><label>Requires Approval?</label><select id="f_approval"><option value="No" ${!t.requiresApproval?'selected':''}>No</option><option value="Yes" ${t.requiresApproval?'selected':''}>Yes</option></select></div>
       <div class="fld"><label>Start date &amp; time</label><div class="row2"><input type="date" id="f_startDate" value="${esc(t.startDate||'')}"/><input type="time" id="f_startTime" value="${esc(t.startTime||'')}"/></div></div>
       <div class="fld"><label>Due date &amp; time</label><div class="row2"><input type="date" id="f_dueDate" value="${esc(t.dueDate||'')}"/><input type="time" id="f_dueTime" value="${esc(t.dueTime||'')}"/></div></div>
+      <div class="fld full"><label>File / Attachment Link</label><input id="f_attUrl" value="${esc(att.url||'')}" placeholder="Paste a Google Drive, Dropbox, or file URL"/></div>
+      <div class="fld"><label>Attachment name</label><input id="f_attName" value="${esc(att.name||'')}" placeholder="e.g. Signed contract.pdf"/></div>
+      <div class="fld"><label>Attachment notes</label><input id="f_attNotes" value="${esc(att.notes||'')}" placeholder="optional"/></div>
       <div class="fld full"><label>Notes</label><textarea id="f_notes" style="min-height:70px">${esc(t.notes||'')}</textarea></div>
     </div></div>
     <div class="mf"><button class="btn" id="modalCancel">Cancel</button><button class="btn primary" id="modalSave">${isNew?'Create Task':'Save Changes'}</button></div>
@@ -1373,11 +1441,17 @@ function renderTaskModal(){
   $("#modalSave").onclick=async()=>{
     const g=id=>$("#"+id).value;
     t.name=g("f_name").trim(); if(!t.name){ toast("Task name is required"); return; }
-    t.owner=g("f_owner").trim(); t.manager=g("f_manager").trim();
+    t.owner=g("f_owner").trim(); t.manager=g("f_manager");
     t.department=g("f_department"); t.priority=g("f_priority"); t.status=g("f_status"); t.cadence=g("f_cadence");
+    t.requiresApproval = g("f_approval")==="Yes";
     t.startDate=g("f_startDate"); t.startTime=g("f_startTime");
     t.dueDate=g("f_dueDate"); t.dueTime=g("f_dueTime");
     t.notes=g("f_notes");
+    // Save the file/attachment link (keep any additional attachments already on the task).
+    const aUrl=g("f_attUrl").trim(), aName=g("f_attName").trim(), aNotes=g("f_attNotes").trim();
+    t.attachments = t.attachments || [];
+    if(aUrl || aName){ t.attachments[0] = {name:aName||aUrl, url:aUrl, notes:aNotes}; }
+    else if(t.attachments.length){ t.attachments.shift(); }
     if(!isNew){ const orig=state.tasks.find(x=>x.id===t.id); if(orig) addActivity(orig,"Task edited"); }
     await saveTask(t,{isNew});
     closeModal();
@@ -1428,7 +1502,7 @@ function renderTemplatesModal(){
 
 <!--
 ================================================================================
- SETUP NOTES — Supabase SQL · Vercel · Email (Google Apps Script)
+ SETUP NOTES — Supabase SQL · Vercel · Email (Resend serverless function)
 ================================================================================
 
 1) SUPABASE SQL
@@ -1450,9 +1524,10 @@ function renderTemplatesModal(){
      create policy "anon update" on public.tasks for update using (true) with check (true);
      create policy "anon delete" on public.tasks for delete using (true);
 
-   Shared settings (Apps Script URL, reminder timing, team directory) are
-   stored in a single row with id = '__settings__'. The per-device user name is
-   kept in localStorage only.
+   New fields live inside each task's `data` JSON: requiresApproval, attachments[],
+   and notif.approval (plus the existing notif.assigned / almost / overdue flags).
+   Shared settings (reminder timing, team directory + emails) are stored in a single
+   row with id = '__settings__'. The per-device user name is kept in localStorage.
 
 2) VERCEL DEPLOY (static site)
    - Framework preset: Other. Build command: empty. Output directory: ./
@@ -1460,43 +1535,26 @@ function renderTemplatesModal(){
    - Optional build-time env vars: VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY
      (for plain static hosting you can just paste the URL + anon key in Settings).
 
-3) EMAIL NOTIFICATIONS (Google Apps Script)
-   The app emails the owner (cc manager) on assign / almost-due / overdue by
-   posting JSON to your Apps Script web app. The browser posts via the same-origin
-   proxy api/notify.js (to avoid CORS); the cron (api/cron-reminders.js) posts to
-   the Apps Script URL directly. Deploy this Apps Script as a Web App:
+3) EMAIL NOTIFICATIONS (Resend serverless function)
+   The browser never holds an email API key. It POSTs the recipients + task
+   fields to /api/send-email, which sends through Resend. The cron
+   (api/cron-reminders.js) sends due-soon / overdue / assignment / approval
+   emails server-side on a schedule. Files: api/send-email.js + lib/email.js.
 
-   Apps Script (Extensions -> Apps Script). Paste, then Deploy -> New deployment
-   -> Web app -> Execute as: Me -> Who has access: Anyone -> copy the /exec URL:
+   a) Create a Resend account (resend.com), add an API key, and (to email anyone
+      other than yourself) verify a sending domain. Then set Vercel env vars:
+        RESEND_API_KEY = re_xxx
+        RESEND_FROM    = "Task Board <tasks@yourdomain.com>"   (a verified sender)
+   b) For the cron (server-side reminders), also set:
+        SUPABASE_URL, SUPABASE_ANON_KEY, CRON_SECRET, and optionally
+        REMINDER_TIMEZONE (default America/New_York), REMINDER_LEAD_MIN (default 120),
+        APP_URL (adds an "Open Task Board" link).
+   c) Enter each owner's and manager's email in Settings -> Team & Email Addresses.
+      Click "Send test email" to confirm.
 
-     function doPost(e) {
-       var d = JSON.parse(e.postData.contents || "{}");
-       var t = d.task || {};
-       if (!d.to) {
-         return ContentService.createTextOutput(JSON.stringify({ ok:false, error:"no recipient" }))
-           .setMimeType(ContentService.MimeType.JSON);
-       }
-       var html =
-         "<h2>" + (d.subject || "Task update") + "</h2>" +
-         "<p><b>Task:</b> " + (t.name || "") + "<br>" +
-         "<b>Owner:</b> " + (t.owner || "") + "<br>" +
-         "<b>Manager:</b> " + (t.manager || "") + "<br>" +
-         "<b>Department:</b> " + (t.department || "") + "<br>" +
-         "<b>Priority:</b> " + (t.priority || "") + "<br>" +
-         "<b>Status:</b> " + (t.status || "") + "<br>" +
-         "<b>Start:</b> " + (t.start || "") + "<br>" +
-         "<b>Due:</b> " + (t.due || "") + "</p>" +
-         (t.notes ? "<p><b>Notes:</b> " + t.notes + "</p>" : "") +
-         (t.link ? '<p><a href="' + t.link + '">Open Task Board</a></p>' : "");
-       MailApp.sendEmail({ to: d.to, cc: d.cc || "", subject: d.subject || "Task update", htmlBody: html });
-       return ContentService.createTextOutput(JSON.stringify({ ok:true }))
-         .setMimeType(ContentService.MimeType.JSON);
-     }
-
-   Then in the app: Settings -> Email Notifications ->
-     - Apps Script Web App URL = the deployed /exec URL.
-   And for the cron, set APPS_SCRIPT_URL as a Vercel env var (or it reads the URL
-   saved in the app). Click "Send test email" to confirm.
+   index.html calls it like:
+     fetch('/api/send-email', { method:'POST', headers:{'Content-Type':'application/json'},
+       body: JSON.stringify({ to, cc, kind, event, task }) });
 ================================================================================
 -->
 </body>
