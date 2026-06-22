@@ -453,7 +453,15 @@ async function loadTasks(){
   }
 }
 
+/* Stamp owner/manager emails onto the task so any consumer (the Apps Script
+   notifier, or the cron) can address both without a directory lookup. */
+function stampContacts(t){
+  const o = contactFor(t.owner), m = contactFor(t.manager);
+  t.ownerEmail = (o && o.email) || "";
+  t.managerEmail = (m && m.email) || "";
+}
 async function persistTask(t){
+  stampContacts(t);
   t.updatedAt = new Date().toISOString();
   if(state.mode==="live" && state.sb){
     const {error} = await state.sb.from("tasks").upsert(
@@ -493,11 +501,14 @@ async function persistSharedSettings(){
 function notifyPayload(task, kind, event){
   const owner = contactFor(task.owner);
   const manager = contactFor(task.manager);
+  // Owner is always the recipient. The manager is cc'd only on due-related
+  // events (almost-due / overdue), not on assignment or update requests.
+  const ccManager = (event === "almost_due" || event === "overdue");
   return {
     event,
     subject: `${kind}: ${task.name}`,
     to: (owner && owner.email) || "",
-    cc: (manager && manager.email) || "",
+    cc: ccManager ? ((manager && manager.email) || "") : "",
     task: {
       name: task.name, owner: task.owner, manager: task.manager,
       department: task.department, priority: task.priority, status: task.status,
