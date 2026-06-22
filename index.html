@@ -240,8 +240,12 @@
   .tmpl .td{font-size:11.5px;color:var(--muted)}
 
   /* Calendar */
-  .calbar{display:flex;align-items:center;gap:12px;margin-bottom:14px}
-  .calbar h2{margin:0;font-size:18px;min-width:190px;text-align:center}
+  .calbar{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+  .calbar h2{margin:0;font-size:18px;min-width:170px;text-align:center}
+  .calviews{display:flex;gap:6px}
+  .cell.big{min-height:190px}
+  .calpill.dept-pill{border-left:0;font-weight:600;font-size:11px;padding:3px 8px;cursor:pointer}
+  .calpill.dept-pill:hover{filter:brightness(1.08)}
   .calgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:1px;background:var(--border);border:1px solid var(--border);
     border-radius:12px;overflow:hidden}
   .calgrid .dow{background:var(--card2);padding:8px;text-align:center;font-size:11px;color:var(--muted2);font-weight:700;text-transform:uppercase}
@@ -397,6 +401,7 @@ const state = {
   drawer: null,            // {type:'task', id} | {type:'day', date}
   modal: null,             // {type:'task', task} | {type:'templates'}
   calRef: new Date(),
+  calView: "month",         // "today" | "week" | "month"
   sb: null                 // supabase client
 };
 
@@ -1267,51 +1272,96 @@ function viewReports(){
 }
 
 /* ---- Calendar -------------------------------------------------------------- */
+/* The calendar mirrors the active task board: only ACTIVE tasks (not completed/
+   archived) are shown, placed by START date & time. Views: Today / This Week /
+   This Month, with Prev/Next/Today navigation. */
+function localKey(dt){ return new Date(dt.getTime()-dt.getTimezoneOffset()*60000).toISOString().slice(0,10); }
+function weekStart(d){ const x=new Date(d); const dow=(x.getDay()+6)%7; x.setDate(x.getDate()-dow); x.setHours(0,0,0,0); return x; }
+function calTitle(view, ref){
+  if(view==="today") return ref.toLocaleDateString(undefined,{weekday:'short',month:'long',day:'numeric',year:'numeric'});
+  if(view==="week"){ const s=weekStart(ref), e=new Date(weekStart(ref)); e.setDate(s.getDate()+6);
+    return s.toLocaleDateString(undefined,{month:'short',day:'numeric'})+' – '+e.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}); }
+  return ref.toLocaleDateString(undefined,{month:'long',year:'numeric'});
+}
+/* Calendar pill: just the task name, highlighted by department. Clicking it
+   routes to the Tasks Board and opens the task to complete/update. */
+function calPill(t){
+  return `<div class="calpill dept-pill" data-goto="${t.id}" title="${esc(t.name)} · ${esc(t.department)}" style="background:${DEPT_COLOR[t.department]};color:#10131a">
+    <span style="overflow:hidden;text-overflow:ellipsis">${esc(t.name)}</span>
+  </div>`;
+}
 function viewCalendar(){
-  const ref=state.calRef; const y=ref.getFullYear(), m=ref.getMonth();
-  const first=new Date(y,m,1); const startDow=(first.getDay()+6)%7; // Monday-first
-  const daysInMonth=new Date(y,m+1,0).getDate();
-  const cells=[];
-  for(let i=0;i<startDow;i++){ const d=new Date(y,m,1-(startDow-i)); cells.push({date:d,out:true}); }
-  for(let d=1;d<=daysInMonth;d++) cells.push({date:new Date(y,m,d),out:false});
-  while(cells.length%7!==0){ const last=cells[cells.length-1].date; cells.push({date:new Date(last.getFullYear(),last.getMonth(),last.getDate()+1),out:true}); }
-
-  const key=dt=>{ return new Date(dt.getTime()-dt.getTimezoneOffset()*60000).toISOString().slice(0,10); };
+  const view = state.calView || "month";
+  const ref = state.calRef;
+  const todayK = todayStr();
+  // Active tasks only (mirrors the board), placed by START date.
   const tasksByDay={};
-  state.tasks.forEach(t=>{ if(!t.dueDate) return; (tasksByDay[t.dueDate]=tasksByDay[t.dueDate]||[]).push(t); });
-  Object.values(tasksByDay).forEach(arr=>arr.sort((a,b)=>(a.dueTime||"")>(b.dueTime||"")?1:-1));
+  state.tasks.filter(isActive).forEach(t=>{ if(!t.startDate) return; (tasksByDay[t.startDate]=tasksByDay[t.startDate]||[]).push(t); });
+  Object.values(tasksByDay).forEach(arr=>arr.sort((a,b)=>(a.startTime||"")>(b.startTime||"")?1:-1));
 
+  const cellHtml=(date,out,big)=>{
+    const k=localKey(date); const list=tasksByDay[k]||[];
+    const limit = big?8:3;
+    const pills=list.slice(0,limit).map(calPill).join("");
+    const more=list.length>limit?`<div class="more">+${list.length-limit} more</div>`:'';
+    return `<div class="cell ${out?'out':''} ${k===todayK?'today':''} ${big?'big':''}" data-day="${k}">
+      <div class="dnum">${date.getDate()}</div>${pills}${more}</div>`;
+  };
   const dows=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
-  const todayK=todayStr();
-  const grid=cells.map(c=>{
-    const k=key(c.date);
-    const list=tasksByDay[k]||[];
-    const pills=list.slice(0,3).map(t=>`
-      <div class="calpill" style="border-left-color:${DEPT_COLOR[t.department]}">
-        <span class="ini" style="background:${DEPT_COLOR[t.department]}">${esc(initials(t.owner||'?'))}</span>
-        <span style="overflow:hidden;text-overflow:ellipsis">${esc(t.name)}</span>
-        <span class="ct">${fmtTime(t.dueTime)}</span>
-      </div>`).join("");
-    const more=list.length>3?`<div class="more">+${list.length-3} more</div>`:'';
-    return `<div class="cell ${c.out?'out':''} ${k===todayK?'today':''}" data-day="${k}">
-      <div class="dnum">${c.date.getDate()}</div>${pills}${more}
-    </div>`;
-  }).join("");
 
-  return `<div class="page-head"><div><h1>Calendar</h1><div class="sub">Tasks shown by due date &amp; time</div></div></div>
+  let body="";
+  if(view==="month"){
+    const y=ref.getFullYear(), m=ref.getMonth();
+    const first=new Date(y,m,1); const startDow=(first.getDay()+6)%7;
+    const daysInMonth=new Date(y,m+1,0).getDate();
+    const cells=[];
+    for(let i=0;i<startDow;i++){ const d=new Date(y,m,1-(startDow-i)); cells.push({date:d,out:true}); }
+    for(let d=1;d<=daysInMonth;d++) cells.push({date:new Date(y,m,d),out:false});
+    while(cells.length%7!==0){ const last=cells[cells.length-1].date; cells.push({date:new Date(last.getFullYear(),last.getMonth(),last.getDate()+1),out:true}); }
+    body=`<div class="calgrid">${dows.map(d=>`<div class="dow">${d}</div>`).join("")}${cells.map(c=>cellHtml(c.date,c.out,false)).join("")}</div>`;
+  } else if(view==="week"){
+    const monday=weekStart(ref); const cells=[];
+    for(let i=0;i<7;i++){ const d=new Date(monday); d.setDate(monday.getDate()+i); cells.push(d); }
+    body=`<div class="calgrid">${dows.map(d=>`<div class="dow">${d}</div>`).join("")}${cells.map(d=>cellHtml(d,false,true)).join("")}</div>`;
+  } else { // today
+    const k=localKey(ref); const list=tasksByDay[k]||[];
+    body=`<div class="card sect">
+      <h2>${ref.toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'})} <span class="cnt">${list.length}</span></h2>
+      ${list.length?`<div style="display:flex;flex-direction:column;gap:6px">${list.map(calPill).join("")}</div>`:'<div class="empty">No active tasks starting on this day.</div>'}
+    </div>`;
+  }
+
+  const vbtn=(v,l)=>`<button class="chip ${view===v?'active':''}" data-calview="${v}">${l}</button>`;
+  return `<div class="page-head"><div><h1>Calendar</h1><div class="sub">Active tasks, by start date &amp; time</div></div></div>
     <div class="calbar">
-      <button class="btn sm" id="calPrev">‹ Prev</button>
-      <h2>${ref.toLocaleDateString(undefined,{month:'long',year:'numeric'})}</h2>
-      <button class="btn sm" id="calNext">Next ›</button>
-      <button class="btn sm" id="calToday">Today</button>
+      <div class="calviews">${vbtn("today","Today")}${vbtn("week","This Week")}${vbtn("month","This Month")}</div>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
+        <button class="btn sm" id="calPrev">‹ Prev</button>
+        <h2>${calTitle(view,ref)}</h2>
+        <button class="btn sm" id="calNext">Next ›</button>
+        <button class="btn sm" id="calToday">Today</button>
+      </div>
     </div>
-    <div class="calgrid">${dows.map(d=>`<div class="dow">${d}</div>`).join("")}${grid}</div>`;
+    ${body}`;
 }
 function bindCalendar(c){
-  $("#calPrev").onclick=()=>{ state.calRef=new Date(state.calRef.getFullYear(),state.calRef.getMonth()-1,1); renderContent(); };
-  $("#calNext").onclick=()=>{ state.calRef=new Date(state.calRef.getFullYear(),state.calRef.getMonth()+1,1); renderContent(); };
-  $("#calToday").onclick=()=>{ state.calRef=new Date(); renderContent(); };
+  c.querySelectorAll("[data-calview]").forEach(el=>el.onclick=()=>{ state.calView=el.dataset.calview; renderContent(); });
+  const step=(dir)=>{
+    const view=state.calView||"month"; const d=new Date(state.calRef);
+    if(view==="today") d.setDate(d.getDate()+dir);
+    else if(view==="week") d.setDate(d.getDate()+7*dir);
+    else d.setMonth(d.getMonth()+dir);
+    state.calRef=d; renderContent();
+  };
+  const p=$("#calPrev"); if(p) p.onclick=()=>step(-1);
+  const n=$("#calNext"); if(n) n.onclick=()=>step(1);
+  const t=$("#calToday"); if(t) t.onclick=()=>{ state.calRef=new Date(); renderContent(); };
   c.querySelectorAll("[data-day]").forEach(el=>el.onclick=()=>{ state.drawer={type:"day",date:el.dataset.day}; renderDrawer(); });
+  // Click a task pill: route to the Tasks Board and open the task to complete/update.
+  c.querySelectorAll("[data-goto]").forEach(el=>el.onclick=(e)=>{
+    e.stopPropagation();
+    state.view="board"; state.drawer={type:"task", id:el.dataset.goto}; render();
+  });
 }
 
 /* ---- Settings -------------------------------------------------------------- */
@@ -1526,13 +1576,13 @@ function renderTaskDrawer(){
 
 function renderDayDrawer(){
   const date=state.drawer.date;
-  const list=state.tasks.filter(t=>t.dueDate===date).sort((a,b)=>(a.dueTime||"")>(b.dueTime||"")?1:-1);
+  const list=state.tasks.filter(t=>t.startDate===date && isActive(t)).sort((a,b)=>(a.startTime||"")>(b.startTime||"")?1:-1);
   const d=new Date(date+"T00:00");
   const inner=`
     <div class="dh">
       <div style="flex:1"><div class="k" style="font-size:11px;color:var(--muted2);text-transform:uppercase">${d.toLocaleDateString(undefined,{weekday:'long'})}</div>
       <div style="font-size:18px;font-weight:700">${d.toLocaleDateString(undefined,{month:'long',day:'numeric',year:'numeric'})}</div>
-      <div class="sub">${list.length} task${list.length!==1?'s':''} due</div></div>
+      <div class="sub">${list.length} task${list.length!==1?'s':''} starting</div></div>
       <button class="x" id="drawerClose">✕</button>
     </div>
     <div class="dbody">
@@ -1540,8 +1590,8 @@ function renderDayDrawer(){
         <div class="card sect" data-open="${t.id}" style="margin-bottom:10px;cursor:pointer;padding:13px">
           <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap">${deptPill(t.department)}${prPill(t.priority)}${statusPill(t.status)}</div>
           <div style="font-weight:700">${esc(t.name)}</div>
-          <div class="sub" style="margin-top:4px;display:flex;align-items:center;gap:6px">${ownerAv(t.owner)} ${esc(t.owner||'Unassigned')} · Due ${t.dueTime?fmtTime(t.dueTime):'(no time)'}</div>
-        </div>`).join(""):'<div class="empty">No tasks due this day.</div>'}
+          <div class="sub" style="margin-top:4px;display:flex;align-items:center;gap:6px">${ownerAv(t.owner)} ${esc(t.owner||'Unassigned')} · Start ${t.startTime?fmtTime(t.startTime):'(no time)'} · Due ${esc(fmtDateTime(t.dueDate,t.dueTime))}</div>
+        </div>`).join(""):'<div class="empty">No active tasks starting this day.</div>'}
       ${isAdmin()?'<button class="btn primary" id="dayNew" style="width:100%;margin-top:8px">＋ New task on this day</button>':''}
     </div>`;
   drawerShell(inner);
