@@ -331,8 +331,9 @@ function isRecurring(t){ return ["Daily","Weekly","Bi-Weekly","Monthly"].include
 /* A task is "completed/archived" once finished — kept in Supabase for history but
    hidden from the active board. Old completed tasks (no archived flag) still count
    as completed via their status. "Active" = everything not completed/archived. */
+function isDeleted(t){ return t.deleted===true; }
 function isCompleted(t){ return t.archived===true || isDone(t); }
-function isActive(t){ return !isCompleted(t); }
+function isActive(t){ return !isCompleted(t) && !isDeleted(t); }
 /* Manager dropdown uses this exact list */
 const MANAGERS = ["Sammy","Lisa","Dyana","Leo","Dawn","Rob"];
 /* Only these users (by profile name) may add/edit/delete tasks. Everyone else
@@ -421,7 +422,7 @@ function toast(msg){ const t=$("#toast"); t.textContent=msg; t.classList.add("sh
 function dueDateTime(t){ if(!t.dueDate) return null; return new Date(t.dueDate + "T" + (t.dueTime || "23:59")); }
 function startDateTime(t){ if(!t.startDate) return null; return new Date(t.startDate + "T" + (t.startTime || "00:00")); }
 function isOverdue(t){
-  if(isDone(t) || t.status==="For Approval") return false;
+  if(t.deleted || isDone(t) || t.status==="For Approval") return false;
   const d = dueDateTime(t); if(!d) return false;
   return d.getTime() < Date.now();
 }
@@ -758,12 +759,22 @@ async function submitForApproval(t){
   render();
 }
 
-async function deleteTask(id){
+/* Delete = open the confirmation popup (admins only). */
+function deleteTask(id){
   if(!requireAdmin()) return;
-  if(!confirm("Delete this task? This cannot be undone.")) return;
-  state.tasks = state.tasks.filter(t=>t.id!==id);
-  await deleteTaskRemote(id);
+  state.modal={type:"confirmDelete", id};
+  renderModal();
+}
+/* Soft delete: keep the row in Supabase, flag it, and hide it everywhere active. */
+async function softDeleteTask(id){
+  const t=state.tasks.find(x=>x.id===id); if(!t){ closeModal(); return; }
+  t.deleted=true;
+  t.deletedAt=new Date().toISOString();
+  t.deletedBy=state.user||"";
+  addActivity(t, "Task deleted");
+  await persistTask(t);
   if(state.drawer && state.drawer.id===id) state.drawer=null;
+  closeModal();
   toast("Task deleted"); render();
 }
 
@@ -805,7 +816,7 @@ function showingCompleted(){
   return state.chip==="completed" || state.dash==="completedWeek" || state.filt.status===DONE_STATUS;
 }
 function visibleTasks(){
-  let list = state.tasks.slice();
+  let list = state.tasks.filter(t=>!t.deleted);   // soft-deleted tasks never show on the board
   const f = state.filt, q = state.search.trim().toLowerCase();
 
   if(q) list = list.filter(t =>
@@ -850,7 +861,7 @@ function visibleTasks(){
   return list;
 }
 function isCompletedThisWeek(t){
-  if(!isDone(t)) return false;
+  if(t.deleted || !isDone(t)) return false;
   if(!t.completedAt) return false;
   const now=new Date(); const day=now.getDay(); const monday=new Date(now);
   monday.setDate(now.getDate()-((day+6)%7)); monday.setHours(0,0,0,0);
@@ -1028,12 +1039,13 @@ function boardTable(tasks){
 
 /* ---- Dashboard ------------------------------------------------------------- */
 function viewDashboard(){
-  const active = state.tasks.filter(isActive).length;
-  const overdue = state.tasks.filter(t=>isActive(t)&&isOverdue(t)).length;
-  const today = state.tasks.filter(t=>isActive(t)&&isDueToday(t)).length;
-  const stuckN = state.tasks.filter(t=>t.status==="Stuck").length;
-  const approvalN = state.tasks.filter(t=>t.status==="For Approval").length;
-  const doneWk = state.tasks.filter(isCompletedThisWeek).length;
+  const live = state.tasks.filter(t=>!t.deleted);
+  const active = live.filter(isActive).length;
+  const overdue = live.filter(t=>isActive(t)&&isOverdue(t)).length;
+  const today = live.filter(t=>isActive(t)&&isDueToday(t)).length;
+  const stuckN = live.filter(t=>t.status==="Stuck").length;
+  const approvalN = live.filter(t=>t.status==="For Approval").length;
+  const doneWk = live.filter(isCompletedThisWeek).length;
   const kpi=(key,val,label,danger,acc)=>`
     <div class="kpi ${state.dash===key?'active':''} ${danger?'danger':''}" data-dash="${key}">
       <div class="acc" style="background:${acc}"></div>
@@ -1079,7 +1091,7 @@ function viewDashboard(){
 function dashLabel(){ return {active:"Active Tasks",overdue:"Overdue",today:"Due Today",stuck:"Stuck",approval:"For Approval",completedWeek:"Completed This Week"}[state.dash]||""; }
 function stuckTasks(){
   return state.tasks.filter(t=>{
-    if(isDone(t)) return false;
+    if(t.deleted || isDone(t)) return false;
     return t.status==="Stuck" || isOverdue(t) || daysSinceUpdate(t)>=3;
   }).sort((a,b)=>(dueDateTime(a)||9e15)-(dueDateTime(b)||9e15));
 }
@@ -1200,27 +1212,28 @@ function viewRecurring(){
 
 /* ---- Reports --------------------------------------------------------------- */
 function viewReports(){
+  const all=state.tasks.filter(t=>!t.deleted);   // soft-deleted tasks excluded from reports
   const weeks=[]; const now=new Date();
   for(let i=5;i>=0;i--){ const m=new Date(now); m.setDate(now.getDate()-((now.getDay()+6)%7)-7*i); m.setHours(0,0,0,0); weeks.push(m); }
   const wkCounts=weeks.map(wkStart=>{
     const wkEnd=new Date(wkStart); wkEnd.setDate(wkStart.getDate()+7);
-    const n=state.tasks.filter(t=>t.completedAt && new Date(t.completedAt)>=wkStart && new Date(t.completedAt)<wkEnd).length;
+    const n=all.filter(t=>t.completedAt && new Date(t.completedAt)>=wkStart && new Date(t.completedAt)<wkEnd).length;
     return {label:wkStart.toLocaleDateString(undefined,{month:'short',day:'numeric'}), n};
   });
   const odTrend=weeks.map(wkStart=>{
     const wkEnd=new Date(wkStart); wkEnd.setDate(wkStart.getDate()+7);
-    const n=state.tasks.filter(t=>{ const d=dueDateTime(t); return d&&d>=wkStart&&d<wkEnd && !isDone(t) && d<new Date(); }).length;
+    const n=all.filter(t=>{ const d=dueDateTime(t); return d&&d>=wkStart&&d<wkEnd && !isDone(t) && d<new Date(); }).length;
     return {label:wkStart.toLocaleDateString(undefined,{month:'short',day:'numeric'}), n};
   });
-  const byDept=DEPARTMENTS.map(d=>({label:d,n:state.tasks.filter(t=>t.department===d).length,color:DEPT_HEX[d]}));
-  const owners=ownersList().map(o=>({label:o,n:state.tasks.filter(t=>t.owner===o).length})).filter(x=>x.n).sort((a,b)=>b.n-a.n).slice(0,10);
-  const recTotal=state.tasks.filter(isRecurring).length;
-  const recDone=state.tasks.filter(t=>isRecurring(t)&&isDone(t)).length;
+  const byDept=DEPARTMENTS.map(d=>({label:d,n:all.filter(t=>t.department===d).length,color:DEPT_HEX[d]}));
+  const owners=ownersList().map(o=>({label:o,n:all.filter(t=>t.owner===o).length})).filter(x=>x.n).sort((a,b)=>b.n-a.n).slice(0,10);
+  const recTotal=all.filter(isRecurring).length;
+  const recDone=all.filter(t=>isRecurring(t)&&isDone(t)).length;
   const recRate=recTotal?Math.round(recDone/recTotal*100):0;
-  const stuckN=state.tasks.filter(t=>t.status==="Stuck").length;
+  const stuckN=all.filter(t=>t.status==="Stuck").length;
 
   // Completed/archived tasks (kept in Supabase) for completion reporting.
-  const completed=state.tasks.filter(isCompleted).sort((a,b)=>new Date(b.completedAt||0)-new Date(a.completedAt||0));
+  const completed=all.filter(isCompleted).sort((a,b)=>new Date(b.completedAt||0)-new Date(a.completedAt||0));
   const tally=(keyFn)=>{ const m={}; completed.forEach(t=>{ const k=keyFn(t)||"—"; m[k]=(m[k]||0)+1; }); return Object.entries(m).map(([label,n])=>({label,n})).sort((a,b)=>b.n-a.n).slice(0,12); };
   const compByOwner=tally(t=>t.owner);
   const compByDept=tally(t=>t.department);
@@ -1617,7 +1630,25 @@ function renderModal(){
   if(state.modal.type==="templates") return renderTemplatesModal();
   if(state.modal.type==="import") return renderImportModal();
   if(state.modal.type==="attach") return renderAttachmentModal();
+  if(state.modal.type==="confirmDelete") return renderConfirmDeleteModal();
   return renderTaskModal();
+}
+
+function renderConfirmDeleteModal(){
+  const t=state.tasks.find(x=>x.id===state.modal.id);
+  const root=$("#modal-root");
+  root.innerHTML=`
+  <div class="modal show"><div class="box" style="max-width:440px">
+    <div class="mh"><h3>Delete Task</h3><button class="x" id="modalClose">✕</button></div>
+    <div class="mb">
+      <div style="font-size:14px">Are you sure you want to delete this task?</div>
+      ${t?`<div class="sub" style="margin-top:8px;color:var(--muted)">“${esc(t.name)}”</div>`:''}
+      <div class="hint" style="margin-top:10px">The task is removed from the board, calendar, and dashboard, but kept in Supabase for history.</div>
+    </div>
+    <div class="mf"><button class="btn" id="modalCancel">Cancel</button><button class="btn danger" id="confirmDel">Delete Task</button></div>
+  </div></div>`;
+  $("#modalClose").onclick=closeModal; $("#modalCancel").onclick=closeModal;
+  $("#confirmDel").onclick=()=>softDeleteTask(state.modal.id);
 }
 
 /* Small popup to add/update a task's file attachment from the board (no full edit). */
@@ -1805,14 +1836,75 @@ function normTime(s){
   if(m){ let h=+m[1]; const ap=m[2].toLowerCase(); if(ap==="pm"&&h<12)h+=12; if(ap==="am"&&h===12)h=0; return String(h).padStart(2,"0")+":00"; }
   return s;
 }
+/* Resolve the nth (1..5, or -1=last) weekday of a given month to a Date. */
+function nthWeekdayOfMonth(year, month, weekday, ord){
+  if(ord===-1){
+    const last=new Date(year, month+1, 0);
+    const d=new Date(last);
+    while(d.getDay()!==weekday) d.setDate(d.getDate()-1);
+    return d;
+  }
+  let count=0;
+  for(let day=1; day<=31; day++){
+    const date=new Date(year, month, day);
+    if(date.getMonth()!==month) break;
+    if(date.getDay()===weekday){ count++; if(count===ord) return date; }
+  }
+  return null;
+}
+/* Parse a schedule phrase (or a literal date) into an actual date.
+   Returns { date:"YYYY-MM-DD"|"", ruleText:"<phrase>"|"", ok:bool }. */
+function parseScheduleRule(input){
+  const raw=String(input||"").trim();
+  if(!raw) return {date:"", ruleText:"", ok:true};
+  const s=raw.toLowerCase();
+  const today=new Date(); today.setHours(0,0,0,0);
+  const ds=d=>new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10);
+  const WD={sunday:0,monday:1,tuesday:2,wednesday:3,thursday:4,friday:5,saturday:6,sun:0,mon:1,tue:2,tues:2,wed:3,thu:4,thur:4,thurs:4,fri:5,sat:6};
+  const ORD={first:1,second:2,third:3,fourth:4,fifth:5,last:-1,"1st":1,"2nd":2,"3rd":3,"4th":4,"5th":5};
+
+  if(s==="today") return {date:ds(today), ruleText:raw, ok:true};
+  if(s==="tomorrow"){ const d=new Date(today); d.setDate(d.getDate()+1); return {date:ds(d), ruleText:raw, ok:true}; }
+
+  // every weekday (Mon–Fri)
+  if(/\bevery\s+weekday\b/.test(s) || s==="weekday"){
+    const d=new Date(today); while(d.getDay()===0||d.getDay()===6) d.setDate(d.getDate()+1);
+    return {date:ds(d), ruleText:raw, ok:true};
+  }
+  // every <ordinal> <weekday> of the month
+  let m=s.match(/\b(first|second|third|fourth|fifth|last|1st|2nd|3rd|4th|5th)\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday|sun|mon|tues?|wed|thur?s?|fri|sat)\b/);
+  if(m){
+    const ord=ORD[m[1]], wd=WD[m[2]];
+    let d=nthWeekdayOfMonth(today.getFullYear(), today.getMonth(), wd, ord);
+    if(d && d<today) d=nthWeekdayOfMonth(today.getFullYear(), today.getMonth()+1, wd, ord);
+    return d ? {date:ds(d), ruleText:raw, ok:true} : {date:"", ruleText:"", ok:false};
+  }
+  // monthly on the Nth (e.g. "Every month on the 15th", "15th of every month")
+  m=s.match(/\b(\d{1,2})(?:st|nd|rd|th)?\b/);
+  if(m && /\bmonth\b/.test(s)){
+    const day=+m[1]; let d=new Date(today.getFullYear(), today.getMonth(), day);
+    if(d<today) d=new Date(today.getFullYear(), today.getMonth()+1, day);
+    return {date:ds(d), ruleText:raw, ok:true};
+  }
+  // every <weekday> / plain weekday name -> next occurrence on/after today
+  m=s.match(/\b(?:every\s+)?(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/);
+  if(m){
+    const wd=WD[m[1]]; const d=new Date(today); d.setDate(d.getDate()+((wd-d.getDay()+7)%7));
+    return {date:ds(d), ruleText:raw, ok:true};
+  }
+  // literal date (YYYY-MM-DD or M/D/YYYY) — not a rule
+  const nd=normDate(raw);
+  if(/^\d{4}-\d{2}-\d{2}$/.test(nd)) return {date:nd, ruleText:"", ok:true};
+  return {date:"", ruleText:"", ok:false};   // unrecognized
+}
 function rowsToTasks(rows){
-  if(!rows || !rows.length) return {tasks:[], skipped:0, error:"No rows found."};
+  if(!rows || !rows.length) return {tasks:[], skipped:0, error:"No rows found.", warnings:[]};
   const header = rows[0].map(h=>String(h||"").trim().toLowerCase());
   const colField={};
   header.forEach((h,idx)=>{ for(const f of IMPORT_HEADERS){ if(IMPORT_FIELDS[f].includes(h)){ colField[idx]=f; break; } } });
   if(!Object.values(colField).includes("name"))
-    return {tasks:[], skipped:0, error:"No 'name' (or 'task') column found in the first row. The first row must be a header."};
-  const tasks=[]; let skipped=0;
+    return {tasks:[], skipped:0, error:"No 'name' (or 'task') column found in the first row. The first row must be a header.", warnings:[]};
+  const tasks=[]; let skipped=0; const warnings=[];
   for(let r=1;r<rows.length;r++){
     const cells=rows[r];
     if(!cells || cells.every(c=>!String(c||"").trim())) continue;
@@ -1827,19 +1919,27 @@ function rowsToTasks(rows){
     t.status=matchOne(o.status, STATUSES, "") || mapStatus(o.status);
     t.cadence=matchOne(o.cadence, CADENCES, "One Off");
     t.requiresApproval=/^(yes|y|true|1)$/i.test(o.requiresApproval||"");
-    if(o.startDate) t.startDate=normDate(o.startDate);
+    // Smart Start/Due dates: understand schedule phrases as well as literal dates.
+    const sr=parseScheduleRule(o.startDate), dr=parseScheduleRule(o.dueDate);
+    if(o.startDate && !sr.ok) warnings.push(`"${o.name}": couldn't understand start date "${o.startDate}"`);
+    if(o.dueDate && !dr.ok) warnings.push(`"${o.name}": couldn't understand due date "${o.dueDate}"`);
+    if(sr.date) t.startDate=sr.date;
+    if(dr.date) t.dueDate=dr.date;
+    if(sr.ruleText) t.startRule=sr.ruleText;
+    if(dr.ruleText) t.dueRule=dr.ruleText;
+    const rule = sr.ruleText || dr.ruleText;
+    if(rule) t.scheduleRule=rule;            // original phrase kept in the task JSON
     if(o.startTime) t.startTime=normTime(o.startTime);
-    if(o.dueDate) t.dueDate=normDate(o.dueDate);
     if(o.dueTime) t.dueTime=normTime(o.dueTime);
     if(o.notes) t.notes=o.notes;
     if(o.attachment) t.attachments=[{name:o.attachment, url:o.attachment, notes:""}];
     tasks.push(t);
   }
-  return {tasks, skipped, error:null};
+  return {tasks, skipped, error:null, warnings};
 }
 function csvCell(v){ v=String(v==null?"":v); return /[",\n]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v; }
 function downloadTemplate(){
-  const sample=["Run weekly payroll","Lisa","Sammy","Finance","High","To Do","2026-06-23","09:00","2026-06-23","17:00","Weekly","Yes","Verify hours first","https://drive.google.com/your-file"];
+  const sample=["Monthly board meeting","Lisa","Sammy","Managers","High","To Do","Every first Thursday of the month","09:00","Every first Thursday of the month","15:00","Monthly","Yes","Prep agenda",""];
   const csv=[IMPORT_HEADERS, sample].map(r=>r.map(csvCell).join(",")).join("\n");
   const blob=new Blob([csv],{type:"text/csv"}); const url=URL.createObjectURL(blob);
   const a=document.createElement("a"); a.href=url; a.download="task-import-template.csv"; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
@@ -1852,6 +1952,7 @@ function doParseImport(text){
   const delim = (firstLine.split("\t").length > firstLine.split(",").length) ? "\t" : ",";
   const res=rowsToTasks(parseDelimited(text, delim));
   state.modal.error=res.error; state.modal.parsed=res.error?null:res.tasks; state.modal.skipped=res.skipped||0;
+  state.modal.warnings=res.warnings||[];
   renderModal();
 }
 async function doImport(tasks, sendEmails){
@@ -1877,17 +1978,19 @@ function renderImportModal(){
     <div class="mh"><h3>Import Tasks from Spreadsheet</h3><button class="x" id="modalClose">✕</button></div>
     <div class="mb">
       <div class="sub" style="margin-bottom:12px">Upload a <b>CSV file</b>, or copy cells from <b>Excel / Google Sheets</b> and paste below. The first row must be a header. Recognized columns: <code class="k">name</code> (required), owner, manager, department, priority, status, startDate, startTime, dueDate, dueTime, cadence, requiresApproval, notes, attachment.</div>
+      <div class="hint" style="margin-bottom:12px">📅 <b>Smart dates:</b> Start/Due dates accept schedule phrases, not just literal dates — e.g. <code class="k">Every first Thursday of the month</code>, <code class="k">Every Monday</code>, <code class="k">Every weekday</code>, <code class="k">Every month on the 15th</code>, <code class="k">Today</code>, <code class="k">Tomorrow</code>. The app calculates the actual date and keeps the original phrase in the task.</div>
       <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">
         <button class="btn sm" id="dlTemplate">⬇ Download CSV template</button>
         <label class="btn sm" style="cursor:pointer">📄 Choose CSV file<input id="csvFile" type="file" accept=".csv,text/csv,text/plain" style="display:none"/></label>
       </div>
       <div class="fld"><label>…or paste rows here (copy from Excel / Google Sheets, or CSV text)</label>
-        <textarea id="pasteArea" style="min-height:120px;width:100%;background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:9px;padding:10px;font-family:monospace;font-size:12px" placeholder="name, owner, manager, department, priority, dueDate, dueTime&#10;Run payroll, Lisa, Sammy, Finance, High, 2026-06-23, 17:00"></textarea>
+        <textarea id="pasteArea" style="min-height:120px;width:100%;background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:9px;padding:10px;font-family:monospace;font-size:12px" placeholder="name, owner, manager, department, priority, startDate, dueDate, dueTime&#10;Board meeting, Lisa, Sammy, Managers, High, Every first Thursday of the month, Every first Thursday of the month, 15:00"></textarea>
       </div>
       <div style="margin-top:8px"><button class="btn sm primary" id="parseBtn">Preview</button></div>
       ${m.error?`<div class="banner demo" style="margin-top:12px">⚠ ${esc(m.error)}</div>`:''}
+      ${(m.warnings&&m.warnings.length)?`<div class="banner demo" style="margin-top:12px">⚠ <b>${m.warnings.length}</b> date rule(s) couldn't be understood — fix these in your sheet and Preview again (these tasks will import without a date):<div style="margin-top:6px;max-height:120px;overflow:auto">${m.warnings.slice(0,50).map(w=>`<div style="font-size:12px">• ${esc(w)}</div>`).join("")}</div></div>`:''}
       ${p?`<div class="banner" style="margin-top:12px">✅ Parsed <b style="margin:0 4px">${p.length}</b> task${p.length!==1?'s':''}${m.skipped?` · ${m.skipped} row(s) skipped (missing name)`:''}.
-        <div style="margin-top:8px;max-height:170px;overflow:auto;width:100%">${p.slice(0,100).map(t=>`<div style="font-size:12px;padding:2px 0">• ${esc(t.name)} <span style="color:var(--muted2)">— ${esc(t.owner||'Unassigned')} · ${esc(t.department)} · ${esc(t.priority)} · due ${esc(fmtDateTime(t.dueDate,t.dueTime))}${t.requiresApproval?' · 🛡️ approval':''}</span></div>`).join("")}</div></div>
+        <div style="margin-top:8px;max-height:170px;overflow:auto;width:100%">${p.slice(0,100).map(t=>`<div style="font-size:12px;padding:2px 0">• ${esc(t.name)} <span style="color:var(--muted2)">— ${esc(t.owner||'Unassigned')} · ${esc(t.department)} · start ${esc(fmtDateTime(t.startDate,t.startTime))} · due ${esc(fmtDateTime(t.dueDate,t.dueTime))}${t.scheduleRule?' · 🔁 '+esc(t.scheduleRule):''}${t.requiresApproval?' · 🛡️':''}</span></div>`).join("")}</div></div>
         <label class="check" style="margin-top:10px"><input type="checkbox" id="impEmail" ${m.sendEmails?'checked':''}/> <span>Email owners that they were assigned (off by default to avoid a burst of emails)</span></label>`:''}
     </div>
     <div class="mf"><button class="btn" id="modalCancel">Cancel</button>
