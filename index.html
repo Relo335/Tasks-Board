@@ -960,11 +960,14 @@ function taskRow(t){
     </td>
   </tr>`;
 }
-/* Board "File" column cell: clickable "Open File" or "No file". */
+/* Board "File" column cell. Click "Attachment" (or "Edit Attachment") to add or
+   update a file link in a small popup — no need to open the whole task. */
 function fileCell(t){
   const a = (t.attachments && t.attachments[0]) || null;
-  if(a && a.url) return `<a class="btn sm" href="${esc(a.url)}" target="_blank" rel="noreferrer" title="${esc(a.name||a.url)}" onclick="event.stopPropagation()">📎 Open File</a>`;
-  return '<span style="color:var(--muted2)">No file</span>';
+  if(a && a.url) return `<div style="display:flex;gap:6px;align-items:center">`+
+    `<a class="btn sm" href="${esc(a.url)}" target="_blank" rel="noreferrer" title="${esc(a.name||a.url)}" onclick="event.stopPropagation()">📎 Open File</a>`+
+    `<button class="btn sm" data-attach="${t.id}" title="Edit attachment">✎ Edit</button></div>`;
+  return `<button class="btn sm" data-attach="${t.id}" title="Add a file/attachment link">＋ Attachment</button>`;
 }
 
 function boardTable(tasks){
@@ -1100,6 +1103,8 @@ function bindBoard(c){
     el.onclick=(e)=>e.stopPropagation();
     el.onchange=()=>{ const t=state.tasks.find(x=>x.id===el.dataset.statussel); if(t) changeStatus(t, el.value); };
   });
+  // Inline attachment popup — add/edit a file link without opening the task.
+  c.querySelectorAll("[data-attach]").forEach(el=>el.onclick=(e)=>{ e.stopPropagation(); openAttachmentModal(el.dataset.attach); });
 }
 
 /* ---- My Tasks -------------------------------------------------------------- */
@@ -1492,7 +1497,52 @@ function renderModal(){
   if(!state.modal){ root.innerHTML=""; return; }
   if(state.modal.type==="templates") return renderTemplatesModal();
   if(state.modal.type==="import") return renderImportModal();
+  if(state.modal.type==="attach") return renderAttachmentModal();
   return renderTaskModal();
+}
+
+/* Small popup to add/update a task's file attachment from the board (no full edit). */
+function openAttachmentModal(id){ state.modal={type:"attach", id}; renderModal(); }
+function renderAttachmentModal(){
+  const t=state.tasks.find(x=>x.id===state.modal.id);
+  if(!t){ closeModal(); return; }
+  const a=(t.attachments && t.attachments[0]) || {name:"",url:"",notes:""};
+  const root=$("#modal-root");
+  root.innerHTML=`
+  <div class="modal show"><div class="box" style="max-width:480px">
+    <div class="mh"><h3>${a.url?'Edit Attachment':'Add Attachment'}</h3><button class="x" id="modalClose">✕</button></div>
+    <div class="mb">
+      <div class="sub" style="margin-bottom:12px">Attach a link for <b>${esc(t.name)}</b> — Google Drive, Dropbox, OneDrive, a PDF/image, or any shared document URL.</div>
+      <div class="form-grid" style="grid-template-columns:1fr">
+        <div class="fld"><label>File name / label</label><input id="at_name" value="${esc(a.name||'')}" placeholder="e.g. Signed contract.pdf"/></div>
+        <div class="fld"><label>File / attachment link (URL)</label><input id="at_url" value="${esc(a.url||'')}" placeholder="https://drive.google.com/…"/></div>
+        <div class="fld"><label>Note (optional)</label><input id="at_notes" value="${esc(a.notes||'')}" placeholder="optional"/></div>
+      </div>
+    </div>
+    <div class="mf">
+      ${a.url?'<button class="btn danger" id="at_remove" style="margin-right:auto">Remove</button>':''}
+      <button class="btn" id="modalCancel">Cancel</button>
+      <button class="btn primary" id="at_save">Save</button>
+    </div>
+  </div></div>`;
+  $("#modalClose").onclick=closeModal; $("#modalCancel").onclick=closeModal;
+  $("#at_save").onclick=async()=>{
+    const name=$("#at_name").value.trim(), url=$("#at_url").value.trim(), notes=$("#at_notes").value.trim();
+    if(!url && !name){ toast("Add a file name or link"); return; }
+    t.attachments = t.attachments || [];
+    t.attachments[0] = {name:name||url, url, notes};
+    t.lastUpdate=new Date().toISOString();
+    addActivity(t, "Updated attachment");
+    await persistTask(t);
+    closeModal(); toast("Attachment saved"); render();
+  };
+  const rm=$("#at_remove"); if(rm) rm.onclick=async()=>{
+    t.attachments=(t.attachments||[]).slice(1);
+    t.lastUpdate=new Date().toISOString();
+    addActivity(t, "Removed attachment");
+    await persistTask(t);
+    closeModal(); toast("Attachment removed"); render();
+  };
 }
 
 function renderTaskModal(){
