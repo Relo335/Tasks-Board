@@ -337,12 +337,12 @@ const TEMPLATES = [
 
 /* Sample team directory (editable in Settings) */
 const DEFAULT_TEAM = [
-  {name:"Robert", department:"Managers", role:"Manager", email:"robert@usrelocators.com", phone:""},
-  {name:"Sales Lead", department:"Sales", role:"", email:"", phone:""},
-  {name:"Marketing Lead", department:"Marketing", role:"", email:"", phone:""},
-  {name:"Operations Lead", department:"Operations", role:"", email:"", phone:""},
-  {name:"Finance Lead", department:"Finance", role:"", email:"", phone:""},
-  {name:"Admin Lead", department:"Admin", role:"", email:"", phone:""}
+  {name:"Robert", department:"Managers", role:"Manager", email:"robert@usrelocators.com", phone:"", chatUserId:""},
+  {name:"Sales Lead", department:"Sales", role:"", email:"", phone:"", chatUserId:""},
+  {name:"Marketing Lead", department:"Marketing", role:"", email:"", phone:"", chatUserId:""},
+  {name:"Operations Lead", department:"Operations", role:"", email:"", phone:"", chatUserId:""},
+  {name:"Finance Lead", department:"Finance", role:"", email:"", phone:"", chatUserId:""},
+  {name:"Admin Lead", department:"Admin", role:"", email:"", phone:"", chatUserId:""}
 ];
 
 /* ---- State ----------------------------------------------------------------- */
@@ -353,6 +353,7 @@ const state = {
     supabaseAnon: DEFAULT_SUPABASE_ANON,
     googleChatWebhook: "",
     notifyEndpoint: "/api/chat-notify",
+    dmEndpoint: "/api/chat-dm",
     reminderLeadMin: 60,
     team: DEFAULT_TEAM.slice()
   },
@@ -416,6 +417,7 @@ function loadConfig(){
   if(!state.cfg.supabaseUrl) state.cfg.supabaseUrl = DEFAULT_SUPABASE_URL;
   if(!state.cfg.supabaseAnon) state.cfg.supabaseAnon = DEFAULT_SUPABASE_ANON;
   if(!state.cfg.notifyEndpoint) state.cfg.notifyEndpoint = "/api/chat-notify";
+  if(!state.cfg.dmEndpoint) state.cfg.dmEndpoint = "/api/chat-dm";
   state.user = localStorage.getItem(LS.user) || "";
   try{ state.collapsed = JSON.parse(localStorage.getItem(LS.collapsed)||"{}"); }catch(e){ state.collapsed={}; }
 }
@@ -485,13 +487,12 @@ async function persistSharedSettings(){
 }
 
 /* ---- Google Chat notifications -------------------------------------------- */
-/* Browsers block direct posts to chat.googleapis.com (CORS), so the app posts
-   to a tiny serverless proxy (see /api/chat-notify code in the comment at the
-   bottom of this file). If no webhook is configured we no-op silently. */
+/* Notifications are sent as a PRIVATE direct message to the task owner via the
+   Chat-bot serverless function (/api/chat-dm), using the owner's Chat user id
+   from the team directory. If the owner has no Chat user id, we fall back to a
+   shared-space incoming webhook (via /api/chat-notify) when one is configured.
+   Both run server-side because browsers can't post to Google Chat directly. */
 async function sendChat(task, kind){
-  const webhook = state.cfg.googleChatWebhook;
-  const endpoint = state.cfg.notifyEndpoint;
-  if(!webhook) return false;
   const link = location.origin + location.pathname;
   const text = [
     `*${kind}*`,
@@ -505,6 +506,24 @@ async function sendChat(task, kind){
     `*Due:* ${fmtDateTime(task.dueDate,task.dueTime)}`,
     `<${link}|Open Task Board>`
   ].join("\n");
+
+  // 1) Private DM to the owner (preferred)
+  const member = contactFor(task.owner);
+  const userId = member && member.chatUserId;
+  if(userId){
+    try{
+      const r = await fetch(state.cfg.dmEndpoint || "/api/chat-dm", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({userId, text})});
+      if(r.ok) return true;
+      console.warn("DM endpoint returned", r.status);
+    }catch(e){ console.warn("DM send failed:", e.message||e); }
+  }
+
+  // 2) Fallback: post to a shared space via the webhook proxy
+  const webhook = state.cfg.googleChatWebhook;
+  const endpoint = state.cfg.notifyEndpoint;
+  if(!webhook) return false;
   try{
     if(endpoint){
       const r = await fetch(endpoint, {method:"POST", headers:{"Content-Type":"application/json"},
@@ -528,7 +547,8 @@ async function notifyAssigned(t, reason){
 
 /* Periodic scan for almost-overdue + overdue notifications (prevents repeats) */
 async function notificationScan(){
-  if(!state.cfg.googleChatWebhook) return;
+  const canDM = (state.cfg.team||[]).some(m=>m.chatUserId);
+  if(!state.cfg.googleChatWebhook && !canDM) return;
   const lead = (state.cfg.reminderLeadMin||60) * 60000;
   let changed=false;
   for(const t of state.tasks){
@@ -1125,6 +1145,7 @@ function viewSettings(){
     <td><input data-team="role" data-i="${i}" value="${esc(mm.role||'')}" placeholder="e.g. Manager"/></td>
     <td><input data-team="email" data-i="${i}" value="${esc(mm.email||'')}" placeholder="email"/></td>
     <td><input data-team="phone" data-i="${i}" value="${esc(mm.phone||'')}" placeholder="phone"/></td>
+    <td><input data-team="chatUserId" data-i="${i}" value="${esc(mm.chatUserId||'')}" placeholder="Chat user id"/></td>
     <td><button class="micro del" data-teamdel="${i}">🗑</button></td>
   </tr>`).join("");
   return `<div class="page-head"><div><h1>Settings</h1><div class="sub">Connection, notifications, and team directory</div></div></div>
@@ -1140,21 +1161,21 @@ function viewSettings(){
   </div>
   <div class="card sect" style="margin-bottom:16px">
     <h2>💬 Google Chat Notifications</h2>
-    <div class="sub" style="margin-bottom:12px">Notifies on: <b>task assigned</b>, <b>almost overdue</b>, and <b>overdue</b>. Repeat sends are prevented (tracked inside each task's data).</div>
+    <div class="sub" style="margin-bottom:12px">Notifies on: <b>task assigned</b>, <b>almost overdue</b> (1 hour before due, by default), and <b>overdue</b>. Repeat sends are prevented (tracked inside each task's data).</div>
+    <div class="hint" style="margin-bottom:12px">📨 <b>Private DMs:</b> each owner is messaged privately when their <b>Chat user id</b> is filled in below in the Team Directory. This requires a Google Chat <b>app/bot</b> with a service account, configured server-side as Vercel env vars (<code class="k">GCHAT_SA_EMAIL</code>, <code class="k">GCHAT_SA_PRIVATE_KEY</code>). See the setup runbook in the README. If an owner has no Chat user id, the message falls back to the shared space webhook below.</div>
     <div class="form-grid">
-      <div class="fld full"><label>Incoming webhook URL</label><input id="gcWebhook" value="${esc(state.cfg.googleChatWebhook)}" placeholder="https://chat.googleapis.com/v1/spaces/…"/></div>
-      <div class="fld full"><label>Serverless proxy endpoint (recommended — see note)</label><input id="gcEndpoint" value="${esc(state.cfg.notifyEndpoint)}" placeholder="/api/chat-notify"/></div>
+      <div class="fld full"><label>Shared-space webhook URL (fallback, optional)</label><input id="gcWebhook" value="${esc(state.cfg.googleChatWebhook)}" placeholder="https://chat.googleapis.com/v1/spaces/…"/></div>
+      <div class="fld full"><label>Webhook proxy endpoint</label><input id="gcEndpoint" value="${esc(state.cfg.notifyEndpoint)}" placeholder="/api/chat-notify"/></div>
       <div class="fld"><label>Almost-overdue reminder timing</label><select id="gcLead">${r}</select></div>
     </div>
-    <div class="hint">⚠ Browsers block direct posts to <code class="k">chat.googleapis.com</code> (CORS). Deploy the small Vercel function at
-      <code class="k">api/chat-notify.js</code> (full code is in the comment at the bottom of this file) and point the endpoint above at it.</div>
     <div style="margin-top:12px"><button class="btn primary" id="saveGc">Save notifications</button> <button class="btn" id="testGc">Send test message</button></div>
   </div>
   <div class="card sect">
     <h2>👥 Team Directory</h2>
-    <div class="sub" style="margin-bottom:10px">Powers owner/manager pickers, department chips, and Email/Text quick actions.</div>
-    <div style="overflow-x:auto"><table class="members-tbl"><thead><tr><th>Name</th><th>Department</th><th>Role</th><th>Email</th><th>Phone</th><th></th></tr></thead>
+    <div class="sub" style="margin-bottom:10px">Powers owner/manager pickers, department chips, Email/Text quick actions, and private Chat DMs (Chat user id).</div>
+    <div style="overflow-x:auto"><table class="members-tbl"><thead><tr><th>Name</th><th>Department</th><th>Role</th><th>Email</th><th>Phone</th><th>Chat user id</th><th></th></tr></thead>
     <tbody>${team}</tbody></table></div>
+    <div class="hint" style="margin-top:8px">The <b>Chat user id</b> is the person's numeric Google Directory/People id (e.g. <code class="k">102…915</code>). See the README for how to find it.</div>
     <div style="margin-top:12px"><button class="btn sm" id="addMember">＋ Add member</button> <button class="btn sm primary" id="saveTeam">Save team</button></div>
   </div>`;
 }
@@ -1178,7 +1199,7 @@ function bindSettings(c){
   };
   c.querySelectorAll("[data-team]").forEach(el=>el.onchange=()=>{ state.cfg.team[+el.dataset.i][el.dataset.team]=el.value; });
   c.querySelectorAll("[data-teamdel]").forEach(el=>el.onclick=()=>{ state.cfg.team.splice(+el.dataset.teamdel,1); saveConfig(); renderContent(); });
-  $("#addMember").onclick=()=>{ state.cfg.team.push({name:"New Member",department:"Operations",role:"",email:"",phone:""}); saveConfig(); renderContent(); };
+  $("#addMember").onclick=()=>{ state.cfg.team.push({name:"New Member",department:"Operations",role:"",email:"",phone:"",chatUserId:""}); saveConfig(); renderContent(); };
   $("#saveTeam").onclick=async()=>{ saveConfig(); await persistSharedSettings(); toast("Team directory saved"); render(); };
 }
 

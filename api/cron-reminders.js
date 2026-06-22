@@ -5,14 +5,17 @@
 // nobody has the task board open in a browser.
 //
 // It reads tasks straight from Supabase (anon key — service role is NOT used),
-// sends notifications via the Google Chat webhook, and writes back the per-task
-// notif flags so reminders are never sent twice (matches the in-app logic).
+// sends each reminder as a PRIVATE Google Chat DM to the task owner (falling
+// back to a shared-space webhook if the owner has no Chat user id), and writes
+// back per-task notif flags so reminders are never sent twice.
 //
 // Required environment variables (Vercel -> Project -> Settings -> Environment Variables):
 //   SUPABASE_URL                e.g. https://qegyeuaeggaxxebixwsz.supabase.co
 //   SUPABASE_ANON_KEY           the anon public key
+//   GCHAT_SA_EMAIL              Chat bot service-account email (for private DMs)
+//   GCHAT_SA_PRIVATE_KEY        Chat bot service-account private key (PEM)
 // Optional:
-//   GOOGLE_CHAT_WEBHOOK         webhook URL (otherwise read from the app's saved settings)
+//   GOOGLE_CHAT_WEBHOOK         shared-space webhook used as a fallback only
 //   CRON_SECRET                 if set, requests must include it (Vercel Cron sends it
 //                               automatically as "Authorization: Bearer <CRON_SECRET>";
 //                               external crons can pass ?key=<CRON_SECRET>)
@@ -20,6 +23,8 @@
 //                               Default "America/New_York" (handles EST/EDT automatically).
 //   REMINDER_LEAD_MIN           minutes before due to send the "almost due" reminder.
 //                               Falls back to the app's saved setting, else 60 (1 hour).
+
+import { sendDirectMessage, sendSpaceMessage } from "../lib/gchat.js";
 
 export default async function handler(req, res) {
   // --- auth -----------------------------------------------------------------
@@ -70,11 +75,16 @@ export default async function handler(req, res) {
 
     const settingsRow = rows.find((r) => r.id === "__settings__");
     const settings = (settingsRow && settingsRow.data) || {};
+    const team = settings.team || [];
+    const memberFor = (name) => team.find((m) => m.name === name);
     const webhook = process.env.GOOGLE_CHAT_WEBHOOK || settings.googleChatWebhook || "";
+    const saEmail = process.env.GCHAT_SA_EMAIL;
+    const saPrivateKey = process.env.GCHAT_SA_PRIVATE_KEY;
+    const canDM = !!(saEmail && saPrivateKey);
     const leadMin = parseInt(process.env.REMINDER_LEAD_MIN, 10) || settings.reminderLeadMin || 60;
     const leadMs = leadMin * 60000;
-    if (!webhook) {
-      res.status(200).json({ ok: true, sent: 0, note: "No Google Chat webhook configured" });
+    if (!canDM && !webhook) {
+      res.status(200).json({ ok: true, sent: 0, note: "No Chat bot credentials or webhook configured" });
       return;
     }
 
@@ -110,12 +120,23 @@ export default async function handler(req, res) {
         `*Due:* ${fmt(task.dueDate, task.dueTime)}`,
         process.env.APP_URL ? `<${process.env.APP_URL}|Open Task Board>` : "",
       ].filter(Boolean).join("\n");
-      const r = await fetch(webhook, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-      });
-      return r.ok;
+
+      // Prefer a private DM to the owner; fall back to the shared-space webhook.
+      const member = memberFor(task.owner);
+      const userId = member && member.chatUserId;
+      if (canDM && userId) {
+        try {
+          await sendDirectMessage({ saEmail, saPrivateKey, userId, text });
+          return true;
+        } catch (e) {
+          console.warn("DM failed for " + task.owner + ":", e.message);
+        }
+      }
+      if (webhook) {
+        try { return await sendSpaceMessage(webhook, text); }
+        catch (e) { console.warn("Space message failed:", e.message); }
+      }
+      return false;
     };
 
     const changed = [];

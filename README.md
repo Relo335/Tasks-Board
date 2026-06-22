@@ -30,14 +30,42 @@ create the table (if needed) is in the comment at the bottom of `index.html`.
 You can also paste the Project URL + anon key in **Settings**, or set
 `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY`. The service role key is never used.
 
-## Google Chat notifications
-Browsers block direct posts to `chat.googleapis.com` (CORS), so notifications go
-through a tiny serverless proxy (`api/chat-notify.js`, already in this repo).
-Set the webhook URL and endpoint (`/api/chat-notify`) in **Settings → Google Chat**
-and click "Send test message".
+## Google Chat notifications — private DMs to each owner
+Notifications are sent as a **private direct message to the task owner**. A Google
+Chat *incoming webhook* cannot DM individuals (it only posts to one space), so the
+app uses a small Google Chat **app/bot** with a service account. The bot
+credentials live server-side as Vercel env vars; the browser and the cron call the
+serverless functions (`api/chat-dm.js`, `api/cron-reminders.js`) which send the DM.
+If an owner has no Chat user id, the message falls back to a shared-space webhook
+(`api/chat-notify.js`) when one is configured.
 
-In-app reminders (almost-overdue / overdue) are only checked while someone has the
-board open in a browser tab.
+### One-time bot setup (you + your Workspace admin)
+1. **Google Cloud project** → enable the **Google Chat API**
+   (console.cloud.google.com → APIs & Services → Enable APIs → "Google Chat API").
+2. **Configure the Chat app**: Chat API → **Configuration** → set app name + avatar,
+   enable it, set **"Receive 1:1 messages"**, and make it **available to your whole
+   domain** (or to the specific people who'll get DMs). An admin may need to approve
+   this so the bot can message users proactively.
+3. **Service account**: IAM & Admin → Service Accounts → create one → **Keys** → add
+   a JSON key and download it. From that JSON you need `client_email` and `private_key`.
+4. **Find each person's Chat user id** (numeric): easiest is the Admin SDK Directory
+   API `users.get` (the `id` field), or the People API. Put each id in the app's
+   **Settings → Team Directory → Chat user id** column, then **Save team**.
+
+### Vercel env vars (Project → Settings → Environment Variables)
+- `SUPABASE_URL` and `SUPABASE_ANON_KEY` (required; service role is never used)
+- `GCHAT_SA_EMAIL` — the service account `client_email`
+- `GCHAT_SA_PRIVATE_KEY` — the service account `private_key` (paste the full PEM;
+  `\n` escapes are handled)
+- `CRON_SECRET` (recommended — pass it as `?key=` when calling the cron endpoint)
+- `REMINDER_TIMEZONE` (default `America/New_York` — DST-aware, so Eastern times are
+  always correct; change only if the team is in another timezone)
+- `REMINDER_LEAD_MIN` (minutes before due for the "almost due" reminder; default `60`)
+- `GOOGLE_CHAT_WEBHOOK` (optional — shared-space fallback only)
+- `APP_URL` (optional — adds an "Open Task Board" link to messages)
+
+In-app reminders are checked every ~60s while someone has the board open; the cron
+covers the rest. Assigned-task DMs fire instantly from the app.
 
 ### 24/7 reminders (Vercel Cron)
 `api/cron-reminders.js` runs server-side so reminders fire even when nobody has
