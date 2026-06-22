@@ -47,16 +47,21 @@ back per-task flags so nothing is sent twice. `vercel.json` schedules it.
 Set these Vercel env vars (Project → Settings → Environment Variables):
 - `SUPABASE_URL` and `SUPABASE_ANON_KEY` (required; service role is never used)
 - `GOOGLE_CHAT_WEBHOOK` (optional — otherwise it uses the webhook saved in the app)
-- `CRON_SECRET` (recommended — Vercel Cron sends it automatically; external crons pass `?key=`)
-- `REMINDER_TZ_OFFSET_MINUTES` (your UTC offset so wall-clock due times resolve correctly,
-  e.g. EST `-300`, EDT `-240`, CST `-360`, PST `-480`; default `0`)
+- `CRON_SECRET` (recommended — pass it as `?key=` when calling the endpoint)
+- `REMINDER_TIMEZONE` (default `America/New_York` — DST-aware, so Eastern times are
+  always correct; change only if the team is in another timezone)
+- `REMINDER_LEAD_MIN` (minutes before due for the "almost due" reminder; default `60`)
 - `APP_URL` (optional — adds an "Open Task Board" link to messages)
 
-**Frequency:** the default schedule is once per day (the max on Vercel's free Hobby
-plan). For "1 hour before due" / "15 min before" reminders you need finer granularity:
-- **Vercel Pro:** change the schedule in `vercel.json` to `*/15 * * * *` (every 15 min).
-- **Free alternative:** keep Hobby and use a free external cron (e.g. cron-job.org) to
-  hit `https://YOUR-SITE/api/cron-reminders?key=YOUR_CRON_SECRET` every 15 minutes.
+**Frequency — fire reminders exactly 1 hour before due:** the `vercel.json` cron is
+once per day (the max on Vercel's free Hobby plan), kept only as a backstop. To get
+true 1-hour-before timing you need a check every ~15 minutes:
+- **Free (any plan):** create a free job at https://cron-job.org that GETs
+  `https://YOUR-SITE/api/cron-reminders?key=YOUR_CRON_SECRET` every 15 minutes.
+- **Vercel Pro:** change the schedule in `vercel.json` to `*/15 * * * *` (every 15 min)
+  and remove the `?key=` requirement (Vercel Cron sends the secret automatically).
+
+Assigned-task notifications fire instantly from the app and do **not** depend on the cron.
 
 ## Notes
 - Each person sets their own name (top-right profile) — greeting and "My Tasks" are per-device.

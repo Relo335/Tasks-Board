@@ -16,9 +16,10 @@
 //   CRON_SECRET                 if set, requests must include it (Vercel Cron sends it
 //                               automatically as "Authorization: Bearer <CRON_SECRET>";
 //                               external crons can pass ?key=<CRON_SECRET>)
-//   REMINDER_TZ_OFFSET_MINUTES  your timezone offset from UTC, in minutes, so stored
-//                               wall-clock due times resolve to the right instant.
-//                               Examples: EST=-300, EDT=-240, CST=-360, PST=-480. Default 0.
+//   REMINDER_TIMEZONE           IANA timezone for the stored wall-clock due times.
+//                               Default "America/New_York" (handles EST/EDT automatically).
+//   REMINDER_LEAD_MIN           minutes before due to send the "almost due" reminder.
+//                               Falls back to the app's saved setting, else 60 (1 hour).
 
 export default async function handler(req, res) {
   // --- auth -----------------------------------------------------------------
@@ -38,7 +39,22 @@ export default async function handler(req, res) {
     res.status(500).json({ error: "Missing SUPABASE_URL / SUPABASE_ANON_KEY env vars" });
     return;
   }
-  const tzOffsetMin = parseInt(process.env.REMINDER_TZ_OFFSET_MINUTES || "0", 10) || 0;
+  const TZ = process.env.REMINDER_TIMEZONE || "America/New_York";
+
+  // Convert a stored wall-clock (date + "HH:MM" in TZ) to a UTC timestamp,
+  // accounting for daylight saving automatically.
+  const tzOffsetMs = (tz, date) => {
+    const dtf = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz, hour12: false,
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+    });
+    const p = {};
+    for (const part of dtf.formatToParts(date)) p[part.type] = part.value;
+    const hour = p.hour === "24" ? "00" : p.hour;
+    const asUTC = Date.UTC(+p.year, +p.month - 1, +p.day, +hour, +p.minute, +p.second);
+    return asUTC - date.getTime();
+  };
 
   const sbHeaders = {
     apikey: SUPABASE_ANON_KEY,
@@ -55,7 +71,8 @@ export default async function handler(req, res) {
     const settingsRow = rows.find((r) => r.id === "__settings__");
     const settings = (settingsRow && settingsRow.data) || {};
     const webhook = process.env.GOOGLE_CHAT_WEBHOOK || settings.googleChatWebhook || "";
-    const leadMs = (settings.reminderLeadMin || 60) * 60000;
+    const leadMin = parseInt(process.env.REMINDER_LEAD_MIN, 10) || settings.reminderLeadMin || 60;
+    const leadMs = leadMin * 60000;
     if (!webhook) {
       res.status(200).json({ ok: true, sent: 0, note: "No Google Chat webhook configured" });
       return;
@@ -68,15 +85,16 @@ export default async function handler(req, res) {
     const now = Date.now();
     const dueInstant = (t) => {
       if (!t.dueDate) return null;
-      // Parse stored wall-clock as UTC, then shift by the configured offset.
+      // Treat the stored wall-clock as UTC first, then correct by the TZ offset
+      // at that moment (DST-aware) to get the real instant.
       const ms = Date.parse(`${t.dueDate}T${t.dueTime || "23:59"}:00Z`);
       if (isNaN(ms)) return null;
-      return ms - tzOffsetMin * 60000;
+      return ms - tzOffsetMs(TZ, new Date(ms));
     };
 
     const fmt = (dateStr, timeStr) => {
       if (!dateStr) return "—";
-      return timeStr ? `${dateStr} ${timeStr}` : dateStr;
+      return timeStr ? `${dateStr} ${timeStr} ET` : dateStr;
     };
 
     const send = async (task, kind) => {
