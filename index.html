@@ -854,6 +854,7 @@ function renderShell(){
         </div>
         <div class="spacer"></div>
         <button class="iconbtn" id="notifBtn" title="Notifications">🔔${notifCount?`<span class="nb">${notifCount}</span>`:""}</button>
+        ${isAdmin()?'<button class="btn" id="importBtn" title="Import tasks from a spreadsheet">⬆ Import</button>':''}
         ${isAdmin()?'<button class="btn primary" id="newTaskBtn">＋ New Task</button>':''}
         <div class="profile" id="profileBtn" title="${isAdmin()?'Admin — full access':'Viewer — status updates only'}">
           <div class="avatar">${esc(initials(state.user||"You"))}</div>
@@ -869,6 +870,7 @@ function renderShell(){
   const search = $("#search");
   search.oninput = e=>{ state.search=e.target.value; renderContent(); const s=$("#search"); s.focus(); s.setSelectionRange(s.value.length,s.value.length); };
   const ntb=$("#newTaskBtn"); if(ntb) ntb.onclick = ()=>openTaskModal();
+  const ib=$("#importBtn"); if(ib) ib.onclick = ()=>openImportModal();
   $("#profileBtn").onclick = ()=>{
     const n = prompt("Your name (used for greeting, My Tasks, and comments):", state.user||"");
     if(n!=null){ state.user=n.trim(); localStorage.setItem(LS.user,state.user); render(); }
@@ -1465,6 +1467,7 @@ function renderModal(){
   const root=$("#modal-root");
   if(!state.modal){ root.innerHTML=""; return; }
   if(state.modal.type==="templates") return renderTemplatesModal();
+  if(state.modal.type==="import") return renderImportModal();
   return renderTaskModal();
 }
 
@@ -1547,6 +1550,162 @@ function renderTemplatesModal(){
     state.modal={type:"task", task:t, isNew:true};
     renderModal();
   });
+}
+
+/* ===========================================================================
+   SPREADSHEET IMPORT (CSV file or paste from Excel/Google Sheets)
+   =========================================================================== */
+const IMPORT_FIELDS = {
+  name:["name","task","task name","title"],
+  owner:["owner","assignee","assigned to","assigned"],
+  manager:["manager"],
+  department:["department","dept"],
+  priority:["priority"],
+  status:["status"],
+  startDate:["startdate","start date","start"],
+  startTime:["starttime","start time"],
+  dueDate:["duedate","due date","due"],
+  dueTime:["duetime","due time"],
+  cadence:["cadence","recurrence","repeat"],
+  requiresApproval:["requiresapproval","requires approval","approval"],
+  notes:["notes","note","description"],
+  attachment:["attachment","file","link","attachment link","file / attachment link"]
+};
+const IMPORT_HEADERS = Object.keys(IMPORT_FIELDS);
+
+function parseDelimited(text, delim){
+  const rows=[]; let row=[], field="", q=false;
+  text = String(text).replace(/\r\n/g,"\n").replace(/\r/g,"\n");
+  for(let i=0;i<text.length;i++){
+    const c=text[i];
+    if(q){
+      if(c==='"'){ if(text[i+1]==='"'){ field+='"'; i++; } else q=false; }
+      else field+=c;
+    } else {
+      if(c==='"') q=true;
+      else if(c===delim){ row.push(field); field=""; }
+      else if(c==="\n"){ row.push(field); rows.push(row); row=[]; field=""; }
+      else field+=c;
+    }
+  }
+  if(field.length || row.length){ row.push(field); rows.push(row); }
+  return rows;
+}
+function matchOne(v, list, fallback){
+  const s=String(v||"").trim().toLowerCase();
+  if(!s) return fallback;
+  return list.find(o=>o.toLowerCase()===s) || fallback;
+}
+function normDate(s){
+  s=String(s||"").trim(); if(!s) return "";
+  if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  let m=s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if(m){ let y=m[3]; if(y.length===2) y="20"+y; return `${y}-${m[1].padStart(2,"0")}-${m[2].padStart(2,"0")}`; }
+  const d=new Date(s); if(!isNaN(d)) return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10);
+  return s;
+}
+function normTime(s){
+  s=String(s||"").trim(); if(!s) return "";
+  let m=s.match(/^(\d{1,2}):(\d{2})\s*([ap]m)?$/i);
+  if(m){ let h=+m[1]; const ap=(m[3]||"").toLowerCase(); if(ap==="pm"&&h<12)h+=12; if(ap==="am"&&h===12)h=0; return String(h).padStart(2,"0")+":"+m[2]; }
+  m=s.match(/^(\d{1,2})\s*([ap]m)$/i);
+  if(m){ let h=+m[1]; const ap=m[2].toLowerCase(); if(ap==="pm"&&h<12)h+=12; if(ap==="am"&&h===12)h=0; return String(h).padStart(2,"0")+":00"; }
+  return s;
+}
+function rowsToTasks(rows){
+  if(!rows || !rows.length) return {tasks:[], skipped:0, error:"No rows found."};
+  const header = rows[0].map(h=>String(h||"").trim().toLowerCase());
+  const colField={};
+  header.forEach((h,idx)=>{ for(const f of IMPORT_HEADERS){ if(IMPORT_FIELDS[f].includes(h)){ colField[idx]=f; break; } } });
+  if(!Object.values(colField).includes("name"))
+    return {tasks:[], skipped:0, error:"No 'name' (or 'task') column found in the first row. The first row must be a header."};
+  const tasks=[]; let skipped=0;
+  for(let r=1;r<rows.length;r++){
+    const cells=rows[r];
+    if(!cells || cells.every(c=>!String(c||"").trim())) continue;
+    const o={}; cells.forEach((v,idx)=>{ if(colField[idx]!=null) o[colField[idx]]=String(v==null?"":v).trim(); });
+    if(!o.name){ skipped++; continue; }
+    const t=blankTask();
+    t.name=o.name;
+    if(o.owner) t.owner=o.owner;
+    if(o.manager) t.manager=o.manager;
+    t.department=matchOne(o.department, DEPARTMENTS, "Operations");
+    t.priority=matchOne(o.priority, PRIORITIES, "Normal");
+    t.status=matchOne(o.status, STATUSES, "To Do");
+    t.cadence=matchOne(o.cadence, CADENCES, "None");
+    t.requiresApproval=/^(yes|y|true|1)$/i.test(o.requiresApproval||"");
+    if(o.startDate) t.startDate=normDate(o.startDate);
+    if(o.startTime) t.startTime=normTime(o.startTime);
+    if(o.dueDate) t.dueDate=normDate(o.dueDate);
+    if(o.dueTime) t.dueTime=normTime(o.dueTime);
+    if(o.notes) t.notes=o.notes;
+    if(o.attachment) t.attachments=[{name:o.attachment, url:o.attachment, notes:""}];
+    tasks.push(t);
+  }
+  return {tasks, skipped, error:null};
+}
+function csvCell(v){ v=String(v==null?"":v); return /[",\n]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v; }
+function downloadTemplate(){
+  const sample=["Run weekly payroll","Lisa","Sammy","Finance","High","To Do","2026-06-23","09:00","2026-06-23","17:00","Weekly","Yes","Verify hours first","https://drive.google.com/your-file"];
+  const csv=[IMPORT_HEADERS, sample].map(r=>r.map(csvCell).join(",")).join("\n");
+  const blob=new Blob([csv],{type:"text/csv"}); const url=URL.createObjectURL(blob);
+  const a=document.createElement("a"); a.href=url; a.download="task-import-template.csv"; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+}
+function openImportModal(){ if(!requireAdmin()) return; state.modal={type:"import", parsed:null, skipped:0, error:null, sendEmails:false}; renderModal(); }
+function doParseImport(text){
+  text=String(text||"").trim();
+  if(!text){ state.modal.error="Nothing to parse — paste rows or choose a CSV file."; state.modal.parsed=null; renderModal(); return; }
+  const firstLine=text.split("\n")[0];
+  const delim = (firstLine.split("\t").length > firstLine.split(",").length) ? "\t" : ",";
+  const res=rowsToTasks(parseDelimited(text, delim));
+  state.modal.error=res.error; state.modal.parsed=res.error?null:res.tasks; state.modal.skipped=res.skipped||0;
+  renderModal();
+}
+async function doImport(tasks, sendEmails){
+  if(!requireAdmin()) return;
+  let n=0;
+  for(const t of tasks){
+    if(!sendEmails) ensureNotif(t).assigned=true;   // suppress assignment email unless asked
+    addActivity(t, "Imported from spreadsheet");
+    state.tasks.push(t);
+    await persistTask(t);
+    if(sendEmails && t.owner){ await notifyAssigned(t, "created"); await persistTask(t); }
+    n++;
+  }
+  closeModal();
+  toast("Imported "+n+" task"+(n!==1?"s":""));
+  render();
+}
+function renderImportModal(){
+  const m=state.modal, root=$("#modal-root");
+  const p=m.parsed;
+  root.innerHTML=`
+  <div class="modal show"><div class="box wide">
+    <div class="mh"><h3>Import Tasks from Spreadsheet</h3><button class="x" id="modalClose">✕</button></div>
+    <div class="mb">
+      <div class="sub" style="margin-bottom:12px">Upload a <b>CSV file</b>, or copy cells from <b>Excel / Google Sheets</b> and paste below. The first row must be a header. Recognized columns: <code class="k">name</code> (required), owner, manager, department, priority, status, startDate, startTime, dueDate, dueTime, cadence, requiresApproval, notes, attachment.</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+        <button class="btn sm" id="dlTemplate">⬇ Download CSV template</button>
+        <label class="btn sm" style="cursor:pointer">📄 Choose CSV file<input id="csvFile" type="file" accept=".csv,text/csv,text/plain" style="display:none"/></label>
+      </div>
+      <div class="fld"><label>…or paste rows here (copy from Excel / Google Sheets, or CSV text)</label>
+        <textarea id="pasteArea" style="min-height:120px;width:100%;background:var(--card);border:1px solid var(--border);color:var(--text);border-radius:9px;padding:10px;font-family:monospace;font-size:12px" placeholder="name, owner, manager, department, priority, dueDate, dueTime&#10;Run payroll, Lisa, Sammy, Finance, High, 2026-06-23, 17:00"></textarea>
+      </div>
+      <div style="margin-top:8px"><button class="btn sm primary" id="parseBtn">Preview</button></div>
+      ${m.error?`<div class="banner demo" style="margin-top:12px">⚠ ${esc(m.error)}</div>`:''}
+      ${p?`<div class="banner" style="margin-top:12px">✅ Parsed <b style="margin:0 4px">${p.length}</b> task${p.length!==1?'s':''}${m.skipped?` · ${m.skipped} row(s) skipped (missing name)`:''}.
+        <div style="margin-top:8px;max-height:170px;overflow:auto;width:100%">${p.slice(0,100).map(t=>`<div style="font-size:12px;padding:2px 0">• ${esc(t.name)} <span style="color:var(--muted2)">— ${esc(t.owner||'Unassigned')} · ${esc(t.department)} · ${esc(t.priority)} · due ${esc(fmtDateTime(t.dueDate,t.dueTime))}${t.requiresApproval?' · 🛡️ approval':''}</span></div>`).join("")}</div></div>
+        <label class="check" style="margin-top:10px"><input type="checkbox" id="impEmail" ${m.sendEmails?'checked':''}/> <span>Email owners that they were assigned (off by default to avoid a burst of emails)</span></label>`:''}
+    </div>
+    <div class="mf"><button class="btn" id="modalCancel">Cancel</button>
+      <button class="btn primary" id="importGo" ${(p&&p.length)?'':'disabled style="opacity:.5;cursor:not-allowed"'}>Import${p&&p.length?' '+p.length+' task'+(p.length!==1?'s':''):''}</button></div>
+  </div></div>`;
+  $("#modalClose").onclick=closeModal; $("#modalCancel").onclick=closeModal;
+  $("#dlTemplate").onclick=downloadTemplate;
+  $("#parseBtn").onclick=()=>doParseImport($("#pasteArea").value);
+  $("#csvFile").onchange=(e)=>{ const f=e.target.files && e.target.files[0]; if(!f) return; const rd=new FileReader(); rd.onload=()=>doParseImport(String(rd.result)); rd.readAsText(f); };
+  const ie=$("#impEmail"); if(ie) ie.onchange=()=>{ state.modal.sendEmails=ie.checked; };
+  const go=$("#importGo"); if(go && p && p.length) go.onclick=()=>doImport(p, state.modal.sendEmails);
 }
 
 /* ===========================================================================
