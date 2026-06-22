@@ -337,12 +337,12 @@ const TEMPLATES = [
 
 /* Sample team directory (editable in Settings) */
 const DEFAULT_TEAM = [
-  {name:"Robert", department:"Managers", role:"Manager", email:"robert@usrelocators.com", phone:"", chatUserId:""},
-  {name:"Sales Lead", department:"Sales", role:"", email:"", phone:"", chatUserId:""},
-  {name:"Marketing Lead", department:"Marketing", role:"", email:"", phone:"", chatUserId:""},
-  {name:"Operations Lead", department:"Operations", role:"", email:"", phone:"", chatUserId:""},
-  {name:"Finance Lead", department:"Finance", role:"", email:"", phone:"", chatUserId:""},
-  {name:"Admin Lead", department:"Admin", role:"", email:"", phone:"", chatUserId:""}
+  {name:"Robert", department:"Managers", role:"Manager", email:"robert@usrelocators.com", phone:""},
+  {name:"Sales Lead", department:"Sales", role:"", email:"", phone:""},
+  {name:"Marketing Lead", department:"Marketing", role:"", email:"", phone:""},
+  {name:"Operations Lead", department:"Operations", role:"", email:"", phone:""},
+  {name:"Finance Lead", department:"Finance", role:"", email:"", phone:""},
+  {name:"Admin Lead", department:"Admin", role:"", email:"", phone:""}
 ];
 
 /* ---- State ----------------------------------------------------------------- */
@@ -351,9 +351,8 @@ const state = {
   cfg: {
     supabaseUrl: DEFAULT_SUPABASE_URL,
     supabaseAnon: DEFAULT_SUPABASE_ANON,
-    googleChatWebhook: "",
-    notifyEndpoint: "/api/chat-notify",
-    dmEndpoint: "/api/chat-dm",
+    appsScriptUrl: "",
+    emailEndpoint: "/api/notify",
     reminderLeadMin: 60,
     team: DEFAULT_TEAM.slice()
   },
@@ -416,8 +415,7 @@ function loadConfig(){
   if(!state.cfg.team || !state.cfg.team.length) state.cfg.team = DEFAULT_TEAM.slice();
   if(!state.cfg.supabaseUrl) state.cfg.supabaseUrl = DEFAULT_SUPABASE_URL;
   if(!state.cfg.supabaseAnon) state.cfg.supabaseAnon = DEFAULT_SUPABASE_ANON;
-  if(!state.cfg.notifyEndpoint) state.cfg.notifyEndpoint = "/api/chat-notify";
-  if(!state.cfg.dmEndpoint) state.cfg.dmEndpoint = "/api/chat-dm";
+  if(!state.cfg.emailEndpoint) state.cfg.emailEndpoint = "/api/notify";
   state.user = localStorage.getItem(LS.user) || "";
   try{ state.collapsed = JSON.parse(localStorage.getItem(LS.collapsed)||"{}"); }catch(e){ state.collapsed={}; }
 }
@@ -446,7 +444,7 @@ async function loadTasks(){
       .map(r => ({...r.data, id:r.id}));
     const cfgRow = (data||[]).find(r=>r.id==="__settings__");
     if(cfgRow && cfgRow.data){
-      ["googleChatWebhook","notifyEndpoint","reminderLeadMin","team"].forEach(k=>{
+      ["appsScriptUrl","emailEndpoint","reminderLeadMin","team"].forEach(k=>{
         if(cfgRow.data[k]!=null) state.cfg[k]=cfgRow.data[k];
       });
     }
@@ -475,8 +473,8 @@ async function deleteTaskRemote(id){
 }
 async function persistSharedSettings(){
   const shared = {
-    googleChatWebhook: state.cfg.googleChatWebhook,
-    notifyEndpoint: state.cfg.notifyEndpoint,
+    appsScriptUrl: state.cfg.appsScriptUrl,
+    emailEndpoint: state.cfg.emailEndpoint,
     reminderLeadMin: state.cfg.reminderLeadMin,
     team: state.cfg.team
   };
@@ -486,53 +484,43 @@ async function persistSharedSettings(){
   }
 }
 
-/* ---- Google Chat notifications -------------------------------------------- */
-/* Notifications are sent as a PRIVATE direct message to the task owner via the
-   Chat-bot serverless function (/api/chat-dm), using the owner's Chat user id
-   from the team directory. If the owner has no Chat user id, we fall back to a
-   shared-space incoming webhook (via /api/chat-notify) when one is configured.
-   Both run server-side because browsers can't post to Google Chat directly. */
-async function sendChat(task, kind){
-  const link = location.origin + location.pathname;
-  const text = [
-    `*${kind}*`,
-    `*Task:* ${task.name}`,
-    `*Owner:* ${task.owner||"—"}`,
-    `*Manager:* ${task.manager||"—"}`,
-    `*Department:* ${task.department||"—"}`,
-    `*Priority:* ${task.priority||"—"}`,
-    `*Status:* ${task.status||"—"}`,
-    `*Start:* ${fmtDateTime(task.startDate,task.startTime)}`,
-    `*Due:* ${fmtDateTime(task.dueDate,task.dueTime)}`,
-    `<${link}|Open Task Board>`
-  ].join("\n");
-
-  // 1) Private DM to the owner (preferred)
-  const member = contactFor(task.owner);
-  const userId = member && member.chatUserId;
-  if(userId){
-    try{
-      const r = await fetch(state.cfg.dmEndpoint || "/api/chat-dm", {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({userId, text})});
-      if(r.ok) return true;
-      console.warn("DM endpoint returned", r.status);
-    }catch(e){ console.warn("DM send failed:", e.message||e); }
-  }
-
-  // 2) Fallback: post to a shared space via the webhook proxy
-  const webhook = state.cfg.googleChatWebhook;
-  const endpoint = state.cfg.notifyEndpoint;
-  if(!webhook) return false;
-  try{
-    if(endpoint){
-      const r = await fetch(endpoint, {method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({webhook, text})});
-      return r.ok;
+/* ---- Email notifications (Google Apps Script web app) --------------------- */
+/* Notifications are emailed to the task owner (cc manager) by posting a JSON
+   payload to a Google Apps Script web app (the URL you deploy, ending in /exec).
+   The browser posts through the same-origin proxy /api/notify to avoid CORS; the
+   cron posts to the Apps Script URL directly. Owner/manager emails come from the
+   team directory. If no Apps Script URL or owner email is set, we no-op. */
+function notifyPayload(task, kind, event){
+  const owner = contactFor(task.owner);
+  const manager = contactFor(task.manager);
+  return {
+    event,
+    subject: `${kind}: ${task.name}`,
+    to: (owner && owner.email) || "",
+    cc: (manager && manager.email) || "",
+    task: {
+      name: task.name, owner: task.owner, manager: task.manager,
+      department: task.department, priority: task.priority, status: task.status,
+      startDate: task.startDate, startTime: task.startTime,
+      dueDate: task.dueDate, dueTime: task.dueTime,
+      start: fmtDateTime(task.startDate, task.startTime),
+      due: fmtDateTime(task.dueDate, task.dueTime),
+      notes: task.notes || "",
+      link: location.origin + location.pathname
     }
-    await fetch(webhook, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({text})});
-    return true;
-  }catch(e){ console.warn("Google Chat notify failed (need serverless proxy):", e.message||e); return false; }
+  };
+}
+async function sendEmail(task, kind, event){
+  const url = state.cfg.appsScriptUrl;
+  if(!url) return false;
+  const payload = notifyPayload(task, kind, event);
+  if(!payload.to){ console.warn("No owner email for", task.owner); return false; }
+  try{
+    const r = await fetch(state.cfg.emailEndpoint || "/api/notify", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({url, payload})});
+    return r.ok;
+  }catch(e){ console.warn("Email notify failed:", e.message||e); return false; }
 }
 
 function ensureNotif(t){ if(!t.notif) t.notif = {assigned:false, almost:false, overdue:false, lastOwner:t.owner||""}; return t.notif; }
@@ -541,14 +529,13 @@ async function notifyAssigned(t, reason){
   const n = ensureNotif(t);
   if(!t.owner) return;
   if(reason==="created" && n.assigned) return;
-  const ok = await sendChat(t, "🟦 Task Assigned");
+  const ok = await sendEmail(t, "Task Assigned", "assigned");
   if(ok){ n.assigned = true; n.lastOwner = t.owner; }
 }
 
 /* Periodic scan for almost-overdue + overdue notifications (prevents repeats) */
 async function notificationScan(){
-  const canDM = (state.cfg.team||[]).some(m=>m.chatUserId);
-  if(!state.cfg.googleChatWebhook && !canDM) return;
+  if(!state.cfg.appsScriptUrl) return;
   const lead = (state.cfg.reminderLeadMin||60) * 60000;
   let changed=false;
   for(const t of state.tasks){
@@ -557,9 +544,9 @@ async function notificationScan(){
     const n = ensureNotif(t);
     const ms = d.getTime() - Date.now();
     if(ms <= 0){
-      if(!n.overdue){ const ok=await sendChat(t,"🔴 Task Overdue"); if(ok){n.overdue=true; changed=true; await persistTask(t);} }
+      if(!n.overdue){ const ok=await sendEmail(t,"Task Overdue","overdue"); if(ok){n.overdue=true; changed=true; await persistTask(t);} }
     }else if(ms <= lead){
-      if(!n.almost){ const ok=await sendChat(t,"🟠 Task Almost Due"); if(ok){n.almost=true; changed=true; await persistTask(t);} }
+      if(!n.almost){ const ok=await sendEmail(t,"Task Almost Due","almost_due"); if(ok){n.almost=true; changed=true; await persistTask(t);} }
     }
   }
   if(changed) render();
@@ -652,8 +639,8 @@ async function deleteTask(id){
 async function quickAskUpdate(t){
   addActivity(t, "Update requested");
   await persistTask(t);
-  const ok = await sendChat(t, "💬 Update Requested");
-  toast(ok ? "Update request sent to Google Chat" : "Logged update request (configure Google Chat to notify)");
+  const ok = await sendEmail(t, "Update Requested", "update_requested");
+  toast(ok ? "Update request emailed to owner" : "Logged update request (set the Apps Script URL in Settings to email)");
   render();
 }
 function quickEmail(t){
@@ -1145,7 +1132,6 @@ function viewSettings(){
     <td><input data-team="role" data-i="${i}" value="${esc(mm.role||'')}" placeholder="e.g. Manager"/></td>
     <td><input data-team="email" data-i="${i}" value="${esc(mm.email||'')}" placeholder="email"/></td>
     <td><input data-team="phone" data-i="${i}" value="${esc(mm.phone||'')}" placeholder="phone"/></td>
-    <td><input data-team="chatUserId" data-i="${i}" value="${esc(mm.chatUserId||'')}" placeholder="Chat user id"/></td>
     <td><button class="micro del" data-teamdel="${i}">🗑</button></td>
   </tr>`).join("");
   return `<div class="page-head"><div><h1>Settings</h1><div class="sub">Connection, notifications, and team directory</div></div></div>
@@ -1160,22 +1146,21 @@ function viewSettings(){
     <div style="margin-top:12px"><button class="btn primary" id="saveSb">Save &amp; reconnect</button></div>
   </div>
   <div class="card sect" style="margin-bottom:16px">
-    <h2>💬 Google Chat Notifications</h2>
-    <div class="sub" style="margin-bottom:12px">Notifies on: <b>task assigned</b>, <b>almost overdue</b> (1 hour before due, by default), and <b>overdue</b>. Repeat sends are prevented (tracked inside each task's data).</div>
-    <div class="hint" style="margin-bottom:12px">📨 <b>Private DMs:</b> each owner is messaged privately when their <b>Chat user id</b> is filled in below in the Team Directory. This requires a Google Chat <b>app/bot</b> with a service account, configured server-side as Vercel env vars (<code class="k">GCHAT_SA_EMAIL</code>, <code class="k">GCHAT_SA_PRIVATE_KEY</code>). See the setup runbook in the README. If an owner has no Chat user id, the message falls back to the shared space webhook below.</div>
+    <h2>📧 Email Notifications</h2>
+    <div class="sub" style="margin-bottom:12px">Emails the task <b>owner</b> (cc <b>manager</b>) on: <b>task assigned</b>, <b>almost overdue</b> (1 hour before due, by default), and <b>overdue</b>. Repeat sends are prevented (tracked inside each task's data). The owner's email comes from the Team Directory below.</div>
+    <div class="hint" style="margin-bottom:12px">📨 Sending is handled by your <b>Google Apps Script web app</b>. Paste its deployed <b>Web App URL</b> (ends in <code class="k">/exec</code>) below. The matching <code class="k">doPost</code> script and deploy steps are in the README.</div>
     <div class="form-grid">
-      <div class="fld full"><label>Shared-space webhook URL (fallback, optional)</label><input id="gcWebhook" value="${esc(state.cfg.googleChatWebhook)}" placeholder="https://chat.googleapis.com/v1/spaces/…"/></div>
-      <div class="fld full"><label>Webhook proxy endpoint</label><input id="gcEndpoint" value="${esc(state.cfg.notifyEndpoint)}" placeholder="/api/chat-notify"/></div>
+      <div class="fld full"><label>Apps Script Web App URL</label><input id="asUrl" value="${esc(state.cfg.appsScriptUrl)}" placeholder="https://script.google.com/macros/s/…/exec"/></div>
       <div class="fld"><label>Almost-overdue reminder timing</label><select id="gcLead">${r}</select></div>
     </div>
-    <div style="margin-top:12px"><button class="btn primary" id="saveGc">Save notifications</button> <button class="btn" id="testGc">Send test message</button></div>
+    <div style="margin-top:12px"><button class="btn primary" id="saveGc">Save notifications</button> <button class="btn" id="testGc">Send test email</button></div>
   </div>
   <div class="card sect">
     <h2>👥 Team Directory</h2>
-    <div class="sub" style="margin-bottom:10px">Powers owner/manager pickers, department chips, Email/Text quick actions, and private Chat DMs (Chat user id).</div>
-    <div style="overflow-x:auto"><table class="members-tbl"><thead><tr><th>Name</th><th>Department</th><th>Role</th><th>Email</th><th>Phone</th><th>Chat user id</th><th></th></tr></thead>
+    <div class="sub" style="margin-bottom:10px">Powers owner/manager pickers, department chips, Email/Text quick actions, and email notifications (owner email).</div>
+    <div style="overflow-x:auto"><table class="members-tbl"><thead><tr><th>Name</th><th>Department</th><th>Role</th><th>Email</th><th>Phone</th><th></th></tr></thead>
     <tbody>${team}</tbody></table></div>
-    <div class="hint" style="margin-top:8px">The <b>Chat user id</b> is the person's numeric Google Directory/People id (e.g. <code class="k">102…915</code>). See the README for how to find it.</div>
+    <div class="hint" style="margin-top:8px">A member's <b>Email</b> is required for them to receive task notifications.</div>
     <div style="margin-top:12px"><button class="btn sm" id="addMember">＋ Add member</button> <button class="btn sm primary" id="saveTeam">Save team</button></div>
   </div>`;
 }
@@ -1186,20 +1171,19 @@ function bindSettings(c){
     saveConfig(); await connect(); await loadTasks(); toast(state.mode==='live'?"Connected to Supabase":"Could not connect — demo mode"); render();
   };
   $("#saveGc").onclick=async()=>{
-    state.cfg.googleChatWebhook=$("#gcWebhook").value.trim();
-    state.cfg.notifyEndpoint=$("#gcEndpoint").value.trim();
+    state.cfg.appsScriptUrl=$("#asUrl").value.trim();
     state.cfg.reminderLeadMin=parseInt($("#gcLead").value,10)||60;
     saveConfig(); await persistSharedSettings(); toast("Notification settings saved");
   };
   $("#testGc").onclick=async()=>{
-    state.cfg.googleChatWebhook=$("#gcWebhook").value.trim();
-    state.cfg.notifyEndpoint=$("#gcEndpoint").value.trim(); saveConfig();
-    const ok=await sendChat({name:"Test message",owner:state.user,manager:"",department:"Operations",priority:"Normal",status:"To Do",startDate:todayStr(),startTime:"09:00",dueDate:todayStr(),dueTime:"17:00"},"✅ Test Notification");
-    toast(ok?"Test sent to Google Chat":"Test failed — check webhook/proxy (see note)");
+    state.cfg.appsScriptUrl=$("#asUrl").value.trim(); saveConfig();
+    const me=contactFor(state.user);
+    const ok=await sendEmail({name:"Test notification",owner:state.user,manager:"",department:"Operations",priority:"Normal",status:"To Do",startDate:todayStr(),startTime:"09:00",dueDate:todayStr(),dueTime:"17:00"},"Test Notification","test");
+    toast(ok?"Test email sent to "+((me&&me.email)||"owner"):"Test failed — set the Apps Script URL and your own email in the directory");
   };
   c.querySelectorAll("[data-team]").forEach(el=>el.onchange=()=>{ state.cfg.team[+el.dataset.i][el.dataset.team]=el.value; });
   c.querySelectorAll("[data-teamdel]").forEach(el=>el.onclick=()=>{ state.cfg.team.splice(+el.dataset.teamdel,1); saveConfig(); renderContent(); });
-  $("#addMember").onclick=()=>{ state.cfg.team.push({name:"New Member",department:"Operations",role:"",email:"",phone:"",chatUserId:""}); saveConfig(); renderContent(); };
+  $("#addMember").onclick=()=>{ state.cfg.team.push({name:"New Member",department:"Operations",role:"",email:"",phone:""}); saveConfig(); renderContent(); };
   $("#saveTeam").onclick=async()=>{ saveConfig(); await persistSharedSettings(); toast("Team directory saved"); render(); };
 }
 
@@ -1444,7 +1428,7 @@ function renderTemplatesModal(){
 
 <!--
 ================================================================================
- SETUP NOTES — Supabase SQL · Vercel · Google Chat proxy
+ SETUP NOTES — Supabase SQL · Vercel · Email (Google Apps Script)
 ================================================================================
 
 1) SUPABASE SQL
@@ -1466,7 +1450,7 @@ function renderTemplatesModal(){
      create policy "anon update" on public.tasks for update using (true) with check (true);
      create policy "anon delete" on public.tasks for delete using (true);
 
-   Shared settings (Google Chat webhook, reminder timing, team directory) are
+   Shared settings (Apps Script URL, reminder timing, team directory) are
    stored in a single row with id = '__settings__'. The per-device user name is
    kept in localStorage only.
 
@@ -1476,42 +1460,43 @@ function renderTemplatesModal(){
    - Optional build-time env vars: VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY
      (for plain static hosting you can just paste the URL + anon key in Settings).
 
-3) GOOGLE CHAT NOTIFICATIONS — why a serverless function is needed
-   Browsers block direct POSTs to https://chat.googleapis.com because Google
-   Chat incoming webhooks do not return CORS headers, so the request is rejected
-   before it reaches Google. The fix is a tiny same-origin serverless proxy that
-   forwards the message server-side. On Vercel, create this exact file:
+3) EMAIL NOTIFICATIONS (Google Apps Script)
+   The app emails the owner (cc manager) on assign / almost-due / overdue by
+   posting JSON to your Apps Script web app. The browser posts via the same-origin
+   proxy api/notify.js (to avoid CORS); the cron (api/cron-reminders.js) posts to
+   the Apps Script URL directly. Deploy this Apps Script as a Web App:
 
-   FILE PATH:  api/chat-notify.js
+   Apps Script (Extensions -> Apps Script). Paste, then Deploy -> New deployment
+   -> Web app -> Execute as: Me -> Who has access: Anyone -> copy the /exec URL:
 
-     // api/chat-notify.js  — Vercel serverless function (Node.js runtime)
-     export default async function handler(req, res) {
-       if (req.method !== "POST") {
-         res.status(405).json({ error: "Method not allowed" });
-         return;
+     function doPost(e) {
+       var d = JSON.parse(e.postData.contents || "{}");
+       var t = d.task || {};
+       if (!d.to) {
+         return ContentService.createTextOutput(JSON.stringify({ ok:false, error:"no recipient" }))
+           .setMimeType(ContentService.MimeType.JSON);
        }
-       try {
-         const { webhook, text } = req.body || {};
-         // Prefer a server-side env var; fall back to the webhook sent by the app.
-         const url = process.env.GOOGLE_CHAT_WEBHOOK || webhook;
-         if (!url) { res.status(400).json({ error: "No webhook configured" }); return; }
-         const r = await fetch(url, {
-           method: "POST",
-           headers: { "Content-Type": "application/json" },
-           body: JSON.stringify({ text }),
-         });
-         const body = await r.text();
-         res.status(r.ok ? 200 : 502).json({ ok: r.ok, body });
-       } catch (e) {
-         res.status(500).json({ error: String(e) });
-       }
+       var html =
+         "<h2>" + (d.subject || "Task update") + "</h2>" +
+         "<p><b>Task:</b> " + (t.name || "") + "<br>" +
+         "<b>Owner:</b> " + (t.owner || "") + "<br>" +
+         "<b>Manager:</b> " + (t.manager || "") + "<br>" +
+         "<b>Department:</b> " + (t.department || "") + "<br>" +
+         "<b>Priority:</b> " + (t.priority || "") + "<br>" +
+         "<b>Status:</b> " + (t.status || "") + "<br>" +
+         "<b>Start:</b> " + (t.start || "") + "<br>" +
+         "<b>Due:</b> " + (t.due || "") + "</p>" +
+         (t.notes ? "<p><b>Notes:</b> " + t.notes + "</p>" : "") +
+         (t.link ? '<p><a href="' + t.link + '">Open Task Board</a></p>' : "");
+       MailApp.sendEmail({ to: d.to, cc: d.cc || "", subject: d.subject || "Task update", htmlBody: html });
+       return ContentService.createTextOutput(JSON.stringify({ ok:true }))
+         .setMimeType(ContentService.MimeType.JSON);
      }
 
-   Then in the app: Settings -> Google Chat ->
-     - Incoming webhook URL  = your Google Chat space webhook (or leave blank and
-       set GOOGLE_CHAT_WEBHOOK as a Vercel env var so it never ships to the browser).
-     - Serverless proxy endpoint = /api/chat-notify   (default; already filled in).
-   Click "Send test message" to confirm it works.
+   Then in the app: Settings -> Email Notifications ->
+     - Apps Script Web App URL = the deployed /exec URL.
+   And for the cron, set APPS_SCRIPT_URL as a Vercel env var (or it reads the URL
+   saved in the app). Click "Send test email" to confirm.
 ================================================================================
 -->
 </body>

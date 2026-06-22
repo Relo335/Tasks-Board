@@ -14,7 +14,7 @@ if Supabase is unreachable the app runs in local **demo mode** via `localStorage
 - Quick actions: Ask for Update, Email Owner, Text Owner, Mark Done, Move Due Date, Edit, Delete
 - Recurring tasks auto-spawn the next occurrence (same start/due time) when marked done
 - Stuck Tasks (no update 3+ days / past due / blocked), Task Templates, and Reports
-- Google Chat notifications (assigned / almost-overdue / overdue) with repeat prevention
+- Email notifications to the owner (assigned / almost-overdue / overdue) with repeat prevention
 
 ## Deploy (Vercel, static — nothing to build)
 1. Import this repo in Vercel → Add New → Project.
@@ -30,69 +30,46 @@ create the table (if needed) is in the comment at the bottom of `index.html`.
 You can also paste the Project URL + anon key in **Settings**, or set
 `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY`. The service role key is never used.
 
-## Google Chat notifications — private DMs to each owner
-Notifications are sent as a **private direct message to the task owner**. A Google
-Chat *incoming webhook* cannot DM individuals (it only posts to one space), so the
-app uses a small Google Chat **app/bot** with a service account. The bot
-credentials live server-side as Vercel env vars; the browser and the cron call the
-serverless functions (`api/chat-dm.js`, `api/cron-reminders.js`) which send the DM.
-If an owner has no Chat user id, the message falls back to a shared-space webhook
-(`api/chat-notify.js`) when one is configured.
+## Email notifications (Google Apps Script)
+Notifications are **emailed to the task owner (cc manager)** on assign,
+almost-overdue (1 hour before due, by default), and overdue. The owner/manager
+emails come from the Team Directory. Sending is done by your **Google Apps Script
+web app**: the browser posts through the same-origin proxy `api/notify.js` (to
+avoid CORS) and the cron (`api/cron-reminders.js`) posts to the Apps Script URL
+directly. Repeat sends are prevented (tracked per task).
 
-### One-time bot setup (you + your Workspace admin)
-1. **Google Cloud project** → enable the **Google Chat API**
-   (console.cloud.google.com → APIs & Services → Enable APIs → "Google Chat API").
-2. **Configure the Chat app**: Chat API → **Configuration** → set app name + avatar,
-   enable it, set **"Receive 1:1 messages"**, set the **App URL (HTTP endpoint)** to
-   `https://YOUR-SITE/api/chat-bot`, and make it **available to your whole domain**
-   (or to the specific people who'll get DMs). An admin may need to approve this so
-   the bot can message users proactively.
-3. **Service account**: IAM & Admin → Service Accounts → create one → **Keys** → add
-   a JSON key and download it. From that JSON you need `client_email` and `private_key`.
-4. **Collect each person's Chat user id** (numeric) — the easy way: have each
-   teammate **send the bot any 1:1 message**; it replies with their Chat user id
-   (handled by `api/chat-bot.js`). Paste each id into the app's **Settings → Team
-   Directory → Chat user id** column, then **Save team**. (Alternatively, read the
-   `id` field from the Admin SDK Directory API `users.get`.)
+### Deploy the Apps Script web app
+1. Open your Apps Script project (or **Extensions → Apps Script** from a Sheet).
+   Paste the `doPost(e)` function shown in the comment at the bottom of `index.html`.
+2. **Deploy → New deployment → Web app** → *Execute as:* **Me** → *Who has access:*
+   **Anyone** → **Deploy** → copy the **Web app URL** (ends in `/exec`).
+3. In the app: **Settings → Email Notifications** → paste that `/exec` URL →
+   set the reminder timing (default 1 hour) → **Save** → **Send test email**.
+4. Fill in each person's **Email** in **Settings → Team Directory** (required to
+   receive notifications), then **Save team**.
 
 ### Vercel env vars (Project → Settings → Environment Variables)
 - `SUPABASE_URL` and `SUPABASE_ANON_KEY` (required; service role is never used)
-- `GCHAT_SA_EMAIL` — the service account `client_email`
-- `GCHAT_SA_PRIVATE_KEY` — the service account `private_key` (paste the full PEM;
-  `\n` escapes are handled)
+- `APPS_SCRIPT_URL` — your Apps Script `/exec` URL (used by the cron; otherwise the
+  cron reads the URL saved in the app's settings)
 - `CRON_SECRET` (recommended — pass it as `?key=` when calling the cron endpoint)
 - `REMINDER_TIMEZONE` (default `America/New_York` — DST-aware, so Eastern times are
   always correct; change only if the team is in another timezone)
 - `REMINDER_LEAD_MIN` (minutes before due for the "almost due" reminder; default `60`)
-- `GOOGLE_CHAT_WEBHOOK` (optional — shared-space fallback only)
-- `APP_URL` (optional — adds an "Open Task Board" link to messages)
+- `APP_URL` (optional — adds an "Open Task Board" link to the email)
 
 In-app reminders are checked every ~60s while someone has the board open; the cron
-covers the rest. Assigned-task DMs fire instantly from the app.
+covers the rest. Assigned-task emails fire instantly from the app.
 
-### 24/7 reminders (Vercel Cron)
-`api/cron-reminders.js` runs server-side so reminders fire even when nobody has
-the board open. It reads tasks from Supabase, sends Google Chat alerts, and writes
-back per-task flags so nothing is sent twice. `vercel.json` schedules it.
-
-Set these Vercel env vars (Project → Settings → Environment Variables):
-- `SUPABASE_URL` and `SUPABASE_ANON_KEY` (required; service role is never used)
-- `GOOGLE_CHAT_WEBHOOK` (optional — otherwise it uses the webhook saved in the app)
-- `CRON_SECRET` (recommended — pass it as `?key=` when calling the endpoint)
-- `REMINDER_TIMEZONE` (default `America/New_York` — DST-aware, so Eastern times are
-  always correct; change only if the team is in another timezone)
-- `REMINDER_LEAD_MIN` (minutes before due for the "almost due" reminder; default `60`)
-- `APP_URL` (optional — adds an "Open Task Board" link to messages)
-
-**Frequency — fire reminders exactly 1 hour before due:** the `vercel.json` cron is
-once per day (the max on Vercel's free Hobby plan), kept only as a backstop. To get
-true 1-hour-before timing you need a check every ~15 minutes:
+### 24/7 reminders (cron) — fire 1 hour before due
+`api/cron-reminders.js` runs server-side so reminders fire even when nobody has the
+board open. The `vercel.json` cron runs once per day (the max on Vercel's free Hobby
+plan), kept only as a backstop. For true 1-hour-before timing you need a check every
+~15 minutes:
 - **Free (any plan):** create a free job at https://cron-job.org that GETs
   `https://YOUR-SITE/api/cron-reminders?key=YOUR_CRON_SECRET` every 15 minutes.
-- **Vercel Pro:** change the schedule in `vercel.json` to `*/15 * * * *` (every 15 min)
-  and remove the `?key=` requirement (Vercel Cron sends the secret automatically).
-
-Assigned-task notifications fire instantly from the app and do **not** depend on the cron.
+- **Vercel Pro:** change the schedule in `vercel.json` to `*/15 * * * *` (every 15 min);
+  Vercel Cron sends the secret automatically.
 
 ## Notes
 - Each person sets their own name (top-right profile) — greeting and "My Tasks" are per-device.
