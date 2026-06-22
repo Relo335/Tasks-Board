@@ -131,6 +131,8 @@ export default async function handler(req, res) {
       };
       const { subject, html } = buildTaskEmail(kind, fields);
       const r = await sendEmail({ to, cc, subject, html });
+      // Stay under Resend's free-tier limit of 2 requests/second.
+      await new Promise((res) => setTimeout(res, 650));
       return r.ok;
     };
 

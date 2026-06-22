@@ -519,13 +519,19 @@ function taskEmailFields(task){
   };
 }
 const EMAIL_ENDPOINT = "/api/send-email";   // serverless email function (Resend)
+const sleep = ms => new Promise(r=>setTimeout(r,ms));
+/* All email sends are serialized through one gate with ~650ms spacing so we
+   never exceed Resend's free-tier limit of 2 requests/second. */
+let _emailGate = Promise.resolve();
+function emailRequest(payload){
+  const run = _emailGate.then(()=> fetch(EMAIL_ENDPOINT, {
+    method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)}));
+  _emailGate = run.then(()=>sleep(650), ()=>sleep(650));   // pace the next send
+  return run;
+}
 async function postEmail(payload){
-  try{
-    const r = await fetch(EMAIL_ENDPOINT, {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify(payload)});
-    return r.ok;
-  }catch(e){ console.warn("Email send failed:", e.message||e); return false; }
+  try{ const r = await emailRequest(payload); return r.ok; }
+  catch(e){ console.warn("Email send failed:", e.message||e); return false; }
 }
 /* event: "assigned" | "almost_due" | "overdue" | "approval" | "test" */
 async function sendEmail(task, kind, event){
@@ -1231,8 +1237,7 @@ function bindSettings(c){
     if(!me || !me.email){ toast("Add your name + email in the directory below first"); return; }
     const fields=taskEmailFields({name:"Test notification",owner:state.user,manager:"",department:"Operations",priority:"Normal",status:"To Do",startDate:todayStr(),startTime:"09:00",dueDate:todayStr(),dueTime:"17:00",attachments:[]});
     try{
-      const r=await fetch(EMAIL_ENDPOINT,{method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({to:me.email,cc:"",kind:"Test Notification",event:"test",task:fields})});
+      const r=await emailRequest({to:me.email,cc:"",kind:"Test Notification",event:"test",task:fields});
       const data=await r.json().catch(()=>({}));
       if(r.ok){ toast("Test email sent to "+me.email); }
       else { alert("Test failed:\n\n"+(data.error||("HTTP "+r.status))+"\n\nFix: open "+EMAIL_ENDPOINT+" in a browser to check the server config, then confirm RESEND_API_KEY / RESEND_FROM are set in Vercel and redeploy."); }
