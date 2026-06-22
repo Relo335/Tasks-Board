@@ -244,6 +244,8 @@
   .calbar h2{margin:0;font-size:18px;min-width:170px;text-align:center}
   .calviews{display:flex;gap:6px}
   .cell.big{min-height:190px}
+  .calpill.dept-pill{border-left:0;font-weight:600;font-size:11px;padding:3px 8px;cursor:pointer}
+  .calpill.dept-pill:hover{filter:brightness(1.08)}
   .calgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:1px;background:var(--border);border:1px solid var(--border);
     border-radius:12px;overflow:hidden}
   .calgrid .dow{background:var(--card2);padding:8px;text-align:center;font-size:11px;color:var(--muted2);font-weight:700;text-transform:uppercase}
@@ -1281,21 +1283,11 @@ function calTitle(view, ref){
     return s.toLocaleDateString(undefined,{month:'short',day:'numeric'})+' – '+e.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}); }
   return ref.toLocaleDateString(undefined,{month:'long',year:'numeric'});
 }
+/* Calendar pill: just the task name, highlighted by department. Clicking it
+   routes to the Tasks Board and opens the task to complete/update. */
 function calPill(t){
-  return `<div class="calpill" data-open-cal="${t.id}" style="border-left-color:${DEPT_COLOR[t.department]}" title="${esc(t.name)} — start ${esc(fmtDateTime(t.startDate,t.startTime))} · due ${esc(fmtDateTime(t.dueDate,t.dueTime))}">
-    <span class="ini" style="background:${DEPT_COLOR[t.department]}">${esc(initials(t.owner||'?'))}</span>
+  return `<div class="calpill dept-pill" data-goto="${t.id}" title="${esc(t.name)} · ${esc(t.department)}" style="background:${DEPT_COLOR[t.department]};color:#10131a">
     <span style="overflow:hidden;text-overflow:ellipsis">${esc(t.name)}</span>
-    <span class="ct">${fmtTime(t.startTime)}${t.dueTime?'→'+fmtTime(t.dueTime):''}</span>
-  </div>`;
-}
-function calDayRow(t){
-  return `<div class="linkrow" data-open-cal="${t.id}" style="cursor:pointer;border-bottom:1px solid var(--border);padding:9px 0">
-    ${ownerAv(t.owner)}
-    <div style="flex:1;min-width:0">
-      <div class="tname" style="font-size:13px">${esc(t.name)}</div>
-      <div class="od">${esc(t.owner||'Unassigned')} · ${esc(t.department)} · start ${esc(fmtDateTime(t.startDate,t.startTime))} · due ${esc(fmtDateTime(t.dueDate,t.dueTime))}</div>
-    </div>
-    ${statusPill(t.status)}
   </div>`;
 }
 function viewCalendar(){
@@ -1335,7 +1327,7 @@ function viewCalendar(){
     const k=localKey(ref); const list=tasksByDay[k]||[];
     body=`<div class="card sect">
       <h2>${ref.toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'})} <span class="cnt">${list.length}</span></h2>
-      ${list.length?list.map(calDayRow).join(""):'<div class="empty">No active tasks starting on this day.</div>'}
+      ${list.length?`<div style="display:flex;flex-direction:column;gap:6px">${list.map(calPill).join("")}</div>`:'<div class="empty">No active tasks starting on this day.</div>'}
     </div>`;
   }
 
@@ -1365,7 +1357,11 @@ function bindCalendar(c){
   const n=$("#calNext"); if(n) n.onclick=()=>step(1);
   const t=$("#calToday"); if(t) t.onclick=()=>{ state.calRef=new Date(); renderContent(); };
   c.querySelectorAll("[data-day]").forEach(el=>el.onclick=()=>{ state.drawer={type:"day",date:el.dataset.day}; renderDrawer(); });
-  c.querySelectorAll("[data-open-cal]").forEach(el=>el.onclick=(e)=>{ e.stopPropagation(); state.drawer={type:"task",id:el.dataset.openCal}; renderDrawer(); });
+  // Click a task pill: route to the Tasks Board and open the task to complete/update.
+  c.querySelectorAll("[data-goto]").forEach(el=>el.onclick=(e)=>{
+    e.stopPropagation();
+    state.view="board"; state.drawer={type:"task", id:el.dataset.goto}; render();
+  });
 }
 
 /* ---- Settings -------------------------------------------------------------- */
