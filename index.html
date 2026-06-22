@@ -309,6 +309,11 @@ const STATUS_CLASS = {
 };
 /* Manager dropdown uses this exact list */
 const MANAGERS = ["Sammy","Lisa","Dyana","Leo","Dawn","Rob"];
+/* Only these users (by profile name) may add/edit/delete tasks. Everyone else
+   can update status, tick checklists, comment, and attach files, and view all
+   sections — but cannot create, edit details, delete, or move due dates.
+   NOTE: this is a UI guardrail, not security — there is no login. */
+const ADMINS = ["sammy","rob","robert"];
 const PRIORITIES = ["Critical","High","Normal","Low"];
 const CADENCES = ["None","Daily","Weekly","Monthly"];
 const REMINDER_OPTIONS = [
@@ -375,6 +380,12 @@ const state = {
 
 /* ---- Utilities ------------------------------------------------------------- */
 const $ = s => document.querySelector(s);
+function isAdmin(){ return ADMINS.includes((state.user||"").trim().toLowerCase()); }
+function requireAdmin(){
+  if(isAdmin()) return true;
+  toast("Only Sammy or Rob can add or change tasks");
+  return false;
+}
 const esc = s => String(s==null?"":s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,9); }
 function initials(name){ return (name||"?").trim().split(/\s+/).map(w=>w[0]).slice(0,2).join("").toUpperCase() || "?"; }
@@ -673,6 +684,22 @@ async function markDone(t){
   render();
 }
 
+/* Update a task's status (allowed for everyone). Routes Done / For Approval
+   through the existing workflow so approval emails + recurring spawn still run. */
+async function changeStatus(t, s){
+  if(!s || s===t.status) return;
+  if(s==="Done" || s==="Recurring Done Today") return markDone(t);
+  if(s==="For Approval") return submitForApproval(t);
+  t.status = s;
+  t.lastUpdate = new Date().toISOString();
+  const n = ensureNotif(t);
+  n.approval = false;                 // re-armed if it later goes to approval again
+  addActivity(t, "Status changed to "+s);
+  await persistTask(t);
+  toast("Status updated to "+s);
+  render();
+}
+
 /* Owner submits an approval-required task; emails the manager for review. */
 async function submitForApproval(t){
   t.status = "For Approval";
@@ -688,6 +715,7 @@ async function submitForApproval(t){
 }
 
 async function deleteTask(id){
+  if(!requireAdmin()) return;
   if(!confirm("Delete this task? This cannot be undone.")) return;
   state.tasks = state.tasks.filter(t=>t.id!==id);
   await deleteTaskRemote(id);
@@ -696,6 +724,7 @@ async function deleteTask(id){
 }
 
 async function quickAskUpdate(t){
+  if(!requireAdmin()) return;
   addActivity(t, "Update requested");
   await persistTask(t);
   const ok = await sendEmail(t, "Update Requested", "update");
@@ -716,6 +745,7 @@ function quickText(t){
   window.location.href = `sms:${num}?&body=${body}`;
 }
 async function moveDueDate(t){
+  if(!requireAdmin()) return;
   const nd = prompt("New due date (YYYY-MM-DD):", t.dueDate||todayStr());
   if(!nd) return;
   const nt = prompt("New due time (HH:MM, 24h):", t.dueTime||"17:00");
@@ -824,10 +854,11 @@ function renderShell(){
         </div>
         <div class="spacer"></div>
         <button class="iconbtn" id="notifBtn" title="Notifications">🔔${notifCount?`<span class="nb">${notifCount}</span>`:""}</button>
-        <button class="btn primary" id="newTaskBtn">＋ New Task</button>
-        <div class="profile" id="profileBtn">
+        ${isAdmin()?'<button class="btn primary" id="newTaskBtn">＋ New Task</button>':''}
+        <div class="profile" id="profileBtn" title="${isAdmin()?'Admin — full access':'Viewer — status updates only'}">
           <div class="avatar">${esc(initials(state.user||"You"))}</div>
           <div class="pn">${esc(state.user||"Set your name")}</div>
+          <span class="stat ${isAdmin()?'s-done':'s-todo'}" style="margin-left:2px">${isAdmin()?'Admin':'Viewer'}</span>
         </div>
       </header>
       <main class="content" id="content"></main>
@@ -837,7 +868,7 @@ function renderShell(){
   app.querySelectorAll("[data-nav]").forEach(b=>b.onclick=()=>{ state.view=b.dataset.nav; state.dash=null; render(); });
   const search = $("#search");
   search.oninput = e=>{ state.search=e.target.value; renderContent(); const s=$("#search"); s.focus(); s.setSelectionRange(s.value.length,s.value.length); };
-  $("#newTaskBtn").onclick = ()=>openTaskModal();
+  const ntb=$("#newTaskBtn"); if(ntb) ntb.onclick = ()=>openTaskModal();
   $("#profileBtn").onclick = ()=>{
     const n = prompt("Your name (used for greeting, My Tasks, and comments):", state.user||"");
     if(n!=null){ state.user=n.trim(); localStorage.setItem(LS.user,state.user); render(); }
@@ -906,9 +937,10 @@ function taskRow(t){
     <td>
       <div class="rowact" data-stop="1">
         <button class="micro go" title="Mark done" data-act="done" data-id="${t.id}">✓</button>
+        ${isAdmin()?`
         <button class="micro" title="Ask for update" data-act="ask" data-id="${t.id}">💬</button>
         <button class="micro" title="Edit" data-act="edit" data-id="${t.id}">✎</button>
-        <button class="micro del" title="Delete" data-act="del" data-id="${t.id}">🗑</button>
+        <button class="micro del" title="Delete" data-act="del" data-id="${t.id}">🗑</button>`:''}
       </div>
     </td>
   </tr>`;
@@ -1194,6 +1226,11 @@ function viewSettings(){
     <td><button class="micro del" data-teamdel="${i}">🗑</button></td>
   </tr>`).join("");
   return `<div class="page-head"><div><h1>Settings</h1><div class="sub">Connection, notifications, and team directory</div></div></div>
+  <div class="banner ${isAdmin()?'':'demo'}" style="margin-bottom:16px">
+    ${isAdmin()
+      ? '🛡️ You are signed in as <b style="margin:0 4px">'+esc(state.user)+'</b> — <b>Admin</b>. You can add, edit, and delete tasks and change settings.'
+      : 'You are in <b style="margin:0 4px">Viewer</b> mode. You can update task status, tick checklists, comment, and attach files. Only <b>Sammy</b> and <b>Rob</b> can add/edit/delete tasks or change settings. Set your name (top-right) if you are one of them.'}
+  </div>
   <div class="card sect" style="margin-bottom:16px">
     <h2>🔌 Supabase Connection</h2>
     <div class="sub" style="margin-bottom:12px">Status: <b style="color:${state.mode==='live'?'var(--d-finance)':'var(--d-sales)'}">${state.mode==='live'?'Live (shared board)':'Demo / local only'}</b>.
@@ -1224,11 +1261,13 @@ function viewSettings(){
 }
 function bindSettings(c){
   $("#saveSb").onclick=async()=>{
+    if(!requireAdmin()) return;
     state.cfg.supabaseUrl=$("#sbUrl").value.trim().replace(/\/+$/,"");
     state.cfg.supabaseAnon=$("#sbKey").value.trim();
     saveConfig(); await connect(); await loadTasks(); toast(state.mode==='live'?"Connected to Supabase":"Could not connect — demo mode"); render();
   };
   $("#saveGc").onclick=async()=>{
+    if(!requireAdmin()) return;
     state.cfg.reminderLeadMin=parseInt($("#gcLead").value,10)||120;
     saveConfig(); await persistSharedSettings(); toast("Notification settings saved");
   };
@@ -1243,10 +1282,10 @@ function bindSettings(c){
       else { alert("Test failed:\n\n"+(data.error||("HTTP "+r.status))+"\n\nFix: open "+EMAIL_ENDPOINT+" in a browser to check the server config, then confirm RESEND_API_KEY / RESEND_FROM are set in Vercel and redeploy."); }
     }catch(e){ alert("Test failed: "+(e.message||e)); }
   };
-  c.querySelectorAll("[data-team]").forEach(el=>el.onchange=()=>{ state.cfg.team[+el.dataset.i][el.dataset.team]=el.value; });
-  c.querySelectorAll("[data-teamdel]").forEach(el=>el.onclick=()=>{ state.cfg.team.splice(+el.dataset.teamdel,1); saveConfig(); renderContent(); });
-  $("#addMember").onclick=()=>{ state.cfg.team.push({name:"New Member",department:"Operations",role:"",email:"",phone:""}); saveConfig(); renderContent(); };
-  $("#saveTeam").onclick=async()=>{ saveConfig(); await persistSharedSettings(); toast("Team directory saved"); render(); };
+  c.querySelectorAll("[data-team]").forEach(el=>el.onchange=()=>{ if(!isAdmin()){ renderContent(); return; } state.cfg.team[+el.dataset.i][el.dataset.team]=el.value; });
+  c.querySelectorAll("[data-teamdel]").forEach(el=>el.onclick=()=>{ if(!requireAdmin()) return; state.cfg.team.splice(+el.dataset.teamdel,1); saveConfig(); renderContent(); });
+  $("#addMember").onclick=()=>{ if(!requireAdmin()) return; state.cfg.team.push({name:"New Member",department:"Operations",role:"",email:"",phone:""}); saveConfig(); renderContent(); };
+  $("#saveTeam").onclick=async()=>{ if(!requireAdmin()) return; saveConfig(); await persistSharedSettings(); toast("Team directory saved"); render(); };
 }
 
 /* ===========================================================================
@@ -1284,16 +1323,23 @@ function renderTaskDrawer(){
       <button class="x" id="drawerClose">✕</button>
     </div>
     <div class="dbody">
+      <div class="dsec" style="margin-bottom:14px">
+        <div class="ht">Update Status</div>
+        <select id="dStatus" style="width:100%;background:var(--card);border:1px solid var(--border);color:var(--text);padding:9px 11px;border-radius:9px;font-size:13px;outline:none">
+          ${STATUSES.map(s=>`<option ${t.status===s?'selected':''}>${esc(s)}</option>`).join("")}
+        </select>
+      </div>
       <div class="qa">
-        <button class="btn sm" data-q="ask">💬 Ask for Update</button>
-        <button class="btn sm" data-q="email">✉ Email Owner</button>
-        <button class="btn sm" data-q="text">📱 Text Owner</button>
         ${(t.requiresApproval && t.status!=="For Approval" && t.status!=="Done" && t.status!=="Recurring Done Today")
           ? '<button class="btn sm" data-q="approval">🛡️ Submit for Approval</button>'
           : '<button class="btn sm" data-q="done">✓ Mark '+((t.status==="For Approval")?"Approved / Done":"Done")+'</button>'}
+        <button class="btn sm" data-q="email">✉ Email Owner</button>
+        <button class="btn sm" data-q="text">📱 Text Owner</button>
+        ${isAdmin()?`
+        <button class="btn sm" data-q="ask">💬 Ask for Update</button>
         <button class="btn sm" data-q="move">📅 Move Due Date</button>
         <button class="btn sm" data-q="edit">✎ Edit</button>
-        <button class="btn sm danger" data-q="del" style="grid-column:1/-1">🗑 Delete Task</button>
+        <button class="btn sm danger" data-q="del" style="grid-column:1/-1">🗑 Delete Task</button>`:''}
       </div>
       <div class="meta">
         ${meta("Owner", esc(t.owner||'—'))}
@@ -1347,6 +1393,8 @@ function renderTaskDrawer(){
   drawerShell(inner);
 
   const reopen=()=>{ if(state.drawer&&state.drawer.type==="task"&&state.drawer.id===t.id) renderTaskDrawer(); };
+  const dStatus=$("#dStatus");
+  if(dStatus) dStatus.onchange=()=>{ changeStatus(t, dStatus.value).then(reopen); };
   $("#drawerEl").querySelectorAll("[data-q]").forEach(el=>el.onclick=()=>{
     const q=el.dataset.q;
     if(q==="ask") quickAskUpdate(t).then(reopen);
@@ -1360,7 +1408,8 @@ function renderTaskDrawer(){
   });
 
   const notes=$("#dNotes");
-  notes.onblur=async()=>{ if((t.notes||"")!==notes.value){ t.notes=notes.value; addActivity(t,"Updated notes"); t.lastUpdate=new Date().toISOString(); await persistTask(t); } };
+  if(!isAdmin()){ notes.setAttribute("readonly","readonly"); notes.style.opacity=".7"; }
+  else notes.onblur=async()=>{ if((t.notes||"")!==notes.value){ t.notes=notes.value; addActivity(t,"Updated notes"); t.lastUpdate=new Date().toISOString(); await persistTask(t); } };
 
   $("#attAdd").onclick=async()=>{ const u=$("#attUrl").value.trim(), nm=$("#attName").value.trim(); if(!u&&!nm)return; (t.attachments=t.attachments||[]).push({name:nm||u,url:u,notes:""}); addActivity(t,"Added a file/attachment"); await persistTask(t); renderTaskDrawer(); render(); };
   $("#drawerEl").querySelectorAll("[data-attdel]").forEach(el=>el.onclick=async()=>{ t.attachments.splice(+el.dataset.attdel,1); await persistTask(t); renderTaskDrawer(); render(); });
@@ -1393,17 +1442,18 @@ function renderDayDrawer(){
           <div style="font-weight:700">${esc(t.name)}</div>
           <div class="sub" style="margin-top:4px;display:flex;align-items:center;gap:6px">${ownerAv(t.owner)} ${esc(t.owner||'Unassigned')} · Due ${t.dueTime?fmtTime(t.dueTime):'(no time)'}</div>
         </div>`).join(""):'<div class="empty">No tasks due this day.</div>'}
-      <button class="btn primary" id="dayNew" style="width:100%;margin-top:8px">＋ New task on this day</button>
+      ${isAdmin()?'<button class="btn primary" id="dayNew" style="width:100%;margin-top:8px">＋ New task on this day</button>':''}
     </div>`;
   drawerShell(inner);
   $("#drawerEl").querySelectorAll("[data-open]").forEach(el=>el.onclick=()=>{ state.drawer={type:"task",id:el.dataset.open}; renderDrawer(); });
-  $("#dayNew").onclick=()=>{ const t=blankTask(); t.dueDate=date; t.startDate=date; closeDrawer(); openTaskModal(t,true); };
+  const dn=$("#dayNew"); if(dn) dn.onclick=()=>{ const t=blankTask(); t.dueDate=date; t.startDate=date; closeDrawer(); openTaskModal(t,true); };
 }
 
 /* ===========================================================================
    MODALS (New/Edit task, Templates)
    =========================================================================== */
 function openTaskModal(task, forceNew){
+  if(!requireAdmin()) return;
   const isNew = forceNew || !task;
   state.modal={type:"task", task: task?JSON.parse(JSON.stringify(task)):blankTask(), isNew};
   renderModal();
