@@ -18,8 +18,39 @@
 //   REMINDER_TIMEZONE     default "America/New_York" (DST-aware)
 //   REMINDER_LEAD_MIN     default 120 (2 hours); falls back to the app's saved setting
 //   APP_URL               optional — adds an "Open Task Board" link
+//   RESEND_API_KEY, RESEND_FROM   required to actually send the email
 
-import { buildTaskEmail, sendEmail } from "../lib/email.js";
+// --- self-contained email helpers (no external imports) --------------------
+function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function escAttr(s){ return String(s==null?"":s).replace(/"/g,"%22"); }
+function buildTaskEmail(kind, t){
+  t = t || {};
+  const subject = `${kind || "Task update"}: ${t.name || "Task"}`;
+  const row = (k,v)=> v ? `<b>${esc(k)}:</b> ${esc(v)}<br>` : "";
+  const html =
+    `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1b212a">` +
+    `<h2 style="margin:0 0 10px">${esc(subject)}</h2><p style="line-height:1.6">` +
+    row("Task",t.name)+row("Owner",t.owner)+row("Manager",t.manager)+row("Department",t.department)+
+    row("Priority",t.priority)+row("Status",t.status)+row("Start",t.start)+row("Due",t.due)+`</p>` +
+    (t.notes?`<p><b>Notes:</b> ${esc(t.notes)}</p>`:"") +
+    (t.attachment?`<p><b>Attachment:</b> <a href="${escAttr(t.attachment)}">${esc(t.attachment)}</a></p>`:"") +
+    (t.link?`<p><a href="${escAttr(t.link)}">Open Task Board</a></p>`:"") + `</div>`;
+  return { subject, html };
+}
+async function sendEmail({ to, cc, subject, html }){
+  const key = process.env.RESEND_API_KEY;
+  const from = process.env.RESEND_FROM || "Task Board <onboarding@resend.dev>";
+  if(!key) return { ok:false, status:500, error:"Missing RESEND_API_KEY env var" };
+  if(!to) return { ok:false, status:400, error:"No recipient" };
+  const payload = { from, to: Array.isArray(to)?to:[to], subject, html };
+  if(cc) payload.cc = Array.isArray(cc)?cc:[cc];
+  const r = await fetch("https://api.resend.com/emails", {
+    method:"POST", headers:{ Authorization:`Bearer ${key}`, "Content-Type":"application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json().catch(()=>({}));
+  return { ok:r.ok, status:r.status, data };
+}
 
 export default async function handler(req, res) {
   const secret = process.env.CRON_SECRET;

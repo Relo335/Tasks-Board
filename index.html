@@ -1226,8 +1226,14 @@ function bindSettings(c){
   $("#testGc").onclick=async()=>{
     const me=contactFor(state.user);
     if(!me || !me.email){ toast("Add your name + email in the directory below first"); return; }
-    const ok=await sendEmail({name:"Test notification",owner:state.user,manager:"",department:"Operations",priority:"Normal",status:"To Do",startDate:todayStr(),startTime:"09:00",dueDate:todayStr(),dueTime:"17:00",attachments:[]},"Test Notification","test");
-    toast(ok?"Test email sent to "+me.email:"Test failed — confirm RESEND_API_KEY is set on the server");
+    const fields=taskEmailFields({name:"Test notification",owner:state.user,manager:"",department:"Operations",priority:"Normal",status:"To Do",startDate:todayStr(),startTime:"09:00",dueDate:todayStr(),dueTime:"17:00",attachments:[]});
+    try{
+      const r=await fetch(state.cfg.emailEndpoint||"/api/send-email",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({to:me.email,cc:"",kind:"Test Notification",event:"test",task:fields})});
+      const data=await r.json().catch(()=>({}));
+      if(r.ok){ toast("Test email sent to "+me.email); }
+      else { alert("Test failed:\n\n"+(data.error||("HTTP "+r.status))+"\n\nFix: open "+(state.cfg.emailEndpoint||"/api/send-email")+" in a browser to check the server config, then confirm RESEND_API_KEY / RESEND_FROM are set in Vercel and redeploy."); }
+    }catch(e){ alert("Test failed: "+(e.message||e)); }
   };
   c.querySelectorAll("[data-team]").forEach(el=>el.onchange=()=>{ state.cfg.team[+el.dataset.i][el.dataset.team]=el.value; });
   c.querySelectorAll("[data-teamdel]").forEach(el=>el.onclick=()=>{ state.cfg.team.splice(+el.dataset.teamdel,1); saveConfig(); renderContent(); });
