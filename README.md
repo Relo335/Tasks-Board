@@ -43,14 +43,17 @@ If an owner has no Chat user id, the message falls back to a shared-space webhoo
 1. **Google Cloud project** → enable the **Google Chat API**
    (console.cloud.google.com → APIs & Services → Enable APIs → "Google Chat API").
 2. **Configure the Chat app**: Chat API → **Configuration** → set app name + avatar,
-   enable it, set **"Receive 1:1 messages"**, and make it **available to your whole
-   domain** (or to the specific people who'll get DMs). An admin may need to approve
-   this so the bot can message users proactively.
+   enable it, set **"Receive 1:1 messages"**, set the **App URL (HTTP endpoint)** to
+   `https://YOUR-SITE/api/chat-bot`, and make it **available to your whole domain**
+   (or to the specific people who'll get DMs). An admin may need to approve this so
+   the bot can message users proactively.
 3. **Service account**: IAM & Admin → Service Accounts → create one → **Keys** → add
    a JSON key and download it. From that JSON you need `client_email` and `private_key`.
-4. **Find each person's Chat user id** (numeric): easiest is the Admin SDK Directory
-   API `users.get` (the `id` field), or the People API. Put each id in the app's
-   **Settings → Team Directory → Chat user id** column, then **Save team**.
+4. **Collect each person's Chat user id** (numeric) — the easy way: have each
+   teammate **send the bot any 1:1 message**; it replies with their Chat user id
+   (handled by `api/chat-bot.js`). Paste each id into the app's **Settings → Team
+   Directory → Chat user id** column, then **Save team**. (Alternatively, read the
+   `id` field from the Admin SDK Directory API `users.get`.)
 
 ### Vercel env vars (Project → Settings → Environment Variables)
 - `SUPABASE_URL` and `SUPABASE_ANON_KEY` (required; service role is never used)
