@@ -279,6 +279,90 @@
   code.k{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:1px 6px;font-size:12px}
   .members-tbl td{padding:6px 8px}
   .members-tbl input,.members-tbl select{width:100%;background:var(--card);border:1px solid var(--border);color:var(--text);padding:5px 7px;border-radius:7px;font-size:12px}
+
+  /* hamburger + nav scrim (hidden on desktop) */
+  .hamburger{display:none;background:var(--card);border:1px solid var(--border);color:var(--text);width:40px;height:40px;
+    border-radius:11px;cursor:pointer;font-size:18px;flex:0 0 auto;align-items:center;justify-content:center}
+  .nav-scrim{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:55}
+  .cal-list{display:flex;flex-direction:column;gap:10px}
+  .cal-daysec{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:11px 13px}
+  .cal-daysec.today{border-color:var(--accent)}
+  .cal-dayhd{font-weight:700;font-size:13px;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+  .cal-dayhd .cnt{color:var(--muted);font-weight:600;font-size:12px}
+
+  /* ===== TABLET (≤1024px) ===== */
+  @media(max-width:1024px){
+    .sidebar{width:200px;flex-basis:200px}
+    .kpis{grid-template-columns:repeat(3,1fr)}
+    .grid2{grid-template-columns:1fr}
+    .rep-grid{grid-template-columns:1fr}
+  }
+
+  /* ===== Collapse sidebar into hamburger (≤860px) ===== */
+  @media(max-width:860px){
+    .sidebar{position:fixed;left:0;top:0;height:100vh;z-index:60;transform:translateX(-100%);
+      transition:transform .22s ease;box-shadow:10px 0 40px rgba(0,0,0,.5)}
+    .sidebar.open{transform:translateX(0)}
+    .nav-scrim.show{display:block}
+    .hamburger{display:flex}
+    .topbar{position:sticky}
+  }
+
+  /* ===== MOBILE (≤640px) ===== */
+  @media(max-width:640px){
+    body{font-size:14px}
+    .content{padding:14px}
+    .topbar{padding:10px 12px;gap:8px;flex-wrap:wrap}
+    .search{order:3;flex:1 1 100%;max-width:none}
+    .topbar .spacer{display:none}
+    .profile .pn{max-width:84px}
+    .page-head h1{font-size:19px}
+
+    .kpis{grid-template-columns:repeat(2,1fr);gap:10px}
+    .kpi .v{font-size:24px}
+
+    /* filters + calendar bars wrap and scroll-free */
+    .filters{gap:6px}
+    select.f{flex:1 1 44%}
+    .calbar{gap:8px}
+    .calbar h2{min-width:0;font-size:16px}
+    .calviews{flex:1 1 100%}
+    .calviews .chip{flex:1}
+
+    /* Drawers become full-screen; modals near full-screen */
+    .drawer{width:100vw;max-width:100vw}
+    .modal{padding:0;align-items:stretch}
+    .modal .box,.modal .box.wide{max-width:100%;min-height:100%;border-radius:0;display:flex;flex-direction:column}
+    .modal .mb{flex:1;overflow-y:auto}
+    .form-grid{grid-template-columns:1fr}
+    .fld .row2{grid-template-columns:1fr 1fr}
+    .qa{grid-template-columns:1fr 1fr}
+    .meta{grid-template-columns:1fr 1fr}
+
+    /* bigger tap targets */
+    .btn{padding:10px 14px}
+    .btn.sm{padding:8px 11px}
+    .micro{width:34px;height:34px}
+    .chip{padding:8px 13px}
+
+    /* ----- Board task table → cards (only .tbl-board; other tables scroll) ----- */
+    .tbl-wrap{overflow:visible}
+    .members-tbl,.card.sect table:not(.tbl-board){min-width:560px}        /* keep settings/report tables scrollable */
+    .tbl-board thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+    .tbl-board,.tbl-board tbody,.tbl-board tr,.tbl-board td{display:block;width:100%}
+    .tbl-board tr{background:var(--card);border:1px solid var(--border);border-radius:12px;margin-bottom:10px;padding:4px 12px}
+    .tbl-board tr:hover{background:var(--card)}
+    .tbl-board tbody td{border:0;border-bottom:1px solid var(--border);padding:9px 0;display:flex;justify-content:space-between;
+      align-items:center;gap:12px;font-size:13px}
+    .tbl-board tbody td:last-child{border-bottom:0}
+    .tbl-board tbody td::before{content:attr(data-label);color:var(--muted2);font-size:11px;text-transform:uppercase;
+      letter-spacing:.04em;font-weight:700;flex:0 0 auto}
+    .tbl-board tbody td>*{margin-left:auto}
+    .tbl-board tbody td .tname{text-align:right}
+    .tbl-board select.statussel{max-width:none}
+    .tbl-board .rowact{justify-content:flex-end;flex-wrap:wrap}
+    .tbl-board .due{align-items:flex-end}
+  }
 </style>
 </head>
 <body>
@@ -403,11 +487,13 @@ const state = {
   modal: null,             // {type:'task', task} | {type:'templates'}
   calRef: new Date(),
   calView: "month",         // "today" | "week" | "month"
+  navOpen: false,           // mobile sidebar open
   sb: null                 // supabase client
 };
 
 /* ---- Utilities ------------------------------------------------------------- */
 const $ = s => document.querySelector(s);
+function isMobile(){ return window.matchMedia("(max-width:640px)").matches; }
 function isAdmin(){ return ADMINS.includes((state.user||"").trim().toLowerCase()); }
 function requireAdmin(){
   if(isAdmin()) return true;
@@ -887,7 +973,8 @@ function renderShell(){
   const app = $("#app");
   app.innerHTML = `
   <div class="app">
-    <aside class="sidebar">
+    <div class="nav-scrim ${state.navOpen?'show':''}" id="navScrim"></div>
+    <aside class="sidebar ${state.navOpen?'open':''}">
       <div class="brand">
         <div class="logo">OC</div>
         <div><div class="t">Ops Command</div><div class="s">Task Board</div></div>
@@ -911,6 +998,7 @@ function renderShell(){
     </aside>
     <div class="main">
       <header class="topbar">
+        <button class="hamburger" id="hamburger" title="Menu" aria-label="Menu">☰</button>
         <div class="search">
           <span class="si">⌕</span>
           <input id="search" placeholder="Search tasks, owners, notes…" value="${esc(state.search)}"/>
@@ -929,7 +1017,9 @@ function renderShell(){
     </div>
   </div>`;
 
-  app.querySelectorAll("[data-nav]").forEach(b=>b.onclick=()=>{ state.view=b.dataset.nav; state.dash=null; render(); });
+  app.querySelectorAll("[data-nav]").forEach(b=>b.onclick=()=>{ state.view=b.dataset.nav; state.dash=null; state.navOpen=false; render(); });
+  const ham=$("#hamburger"); if(ham) ham.onclick=()=>{ state.navOpen=!state.navOpen; render(); };
+  const nsc=$("#navScrim"); if(nsc) nsc.onclick=()=>{ state.navOpen=false; render(); };
   const search = $("#search");
   search.oninput = e=>{ state.search=e.target.value; renderContent(); const s=$("#search"); s.focus(); s.setSelectionRange(s.value.length,s.value.length); };
   const ntb=$("#newTaskBtn"); if(ntb) ntb.onclick = ()=>openTaskModal();
@@ -995,17 +1085,17 @@ function taskRow(t){
     ? `<div class="due"><span>${fmtDateTime(t.startDate,'')}</span><span class="tm">${fmtTime(t.startTime)}</span></div>`
     : '<span style="color:var(--muted2)">—</span>';
   return `<tr data-open="${t.id}">
-    <td><div class="tname">${esc(t.name)}${od?' <span class="overdue-txt">●</span>':''}${t.requiresApproval?' <span title="Requires approval">🛡️</span>':''}${(t.attachments&&t.attachments.length)?` <a href="${esc(t.attachments[0].url||'#')}" target="_blank" rel="noreferrer" title="${esc(t.attachments[0].name||'Attachment')}" onclick="event.stopPropagation()">📎</a>`:''}<div class="od">${esc(t.department)}</div></div></td>
-    <td><div class="ownercell">${ownerAv(t.owner)}<span>${esc(t.owner||'—')}</span></div></td>
-    <td>${esc(t.manager||'—')}</td>
-    <td>${prPill(t.priority)}</td>
-    <td>${start}</td>
-    <td>${due}</td>
-    <td>${isRecurring(t)?`<span class="pill" style="background:var(--card2);border-color:var(--border)">↻ ${esc(t.cadence)}</span>`:'<span style="color:var(--muted2)">One Off</span>'}</td>
-    <td><div data-stop="1">${statusSelect(t)}</div></td>
-    <td><div data-stop="1">${fileCell(t)}</div></td>
-    <td style="color:var(--muted)">${t.lastUpdate?timeAgo(t.lastUpdate):'—'}</td>
-    <td>
+    <td data-label="Task"><div class="tname">${esc(t.name)}${od?' <span class="overdue-txt">●</span>':''}${t.requiresApproval?' <span title="Requires approval">🛡️</span>':''}${(t.attachments&&t.attachments.length)?` <a href="${esc(t.attachments[0].url||'#')}" target="_blank" rel="noreferrer" title="${esc(t.attachments[0].name||'Attachment')}" onclick="event.stopPropagation()">📎</a>`:''}<div class="od">${esc(t.department)}</div></div></td>
+    <td data-label="Owner"><div class="ownercell">${ownerAv(t.owner)}<span>${esc(t.owner||'—')}</span></div></td>
+    <td data-label="Manager">${esc(t.manager||'—')}</td>
+    <td data-label="Priority">${prPill(t.priority)}</td>
+    <td data-label="Start">${start}</td>
+    <td data-label="Due">${due}</td>
+    <td data-label="Cadence">${isRecurring(t)?`<span class="pill" style="background:var(--card2);border-color:var(--border)">↻ ${esc(t.cadence)}</span>`:'<span style="color:var(--muted2)">One Off</span>'}</td>
+    <td data-label="Status"><div data-stop="1">${statusSelect(t)}</div></td>
+    <td data-label="File"><div data-stop="1">${fileCell(t)}</div></td>
+    <td data-label="Updated" style="color:var(--muted)">${t.lastUpdate?timeAgo(t.lastUpdate):'—'}</td>
+    <td data-label="Actions">
       <div class="rowact" data-stop="1">
         <button class="micro go" title="Mark done" data-act="done" data-id="${t.id}">✓</button>
         ${isAdmin()?`
@@ -1028,7 +1118,7 @@ function fileCell(t){
 
 function boardTable(tasks){
   if(!tasks.length) return `<div class="empty">No tasks match the current filters.</div>`;
-  return `<div style="overflow-x:auto"><table>
+  return `<div class="tbl-wrap"><table class="tbl-board">
     <thead><tr>
       <th>Task</th><th>Owner</th><th>Manager</th><th>Priority</th>
       <th>Start</th><th>Due</th><th>Cadence</th><th>Status</th><th>File</th><th>Last Update</th><th>Actions</th>
@@ -1321,27 +1411,46 @@ function viewCalendar(){
       <div class="dnum">${date.getDate()}</div>${pills}${more}</div>`;
   };
   const dows=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+  const mobile=isMobile();
+
+  // Stacked day-list (used on phones for Week/Month, and always for Today).
+  const dayList=(dates, skipEmpty)=>dates.map(d=>{
+    const k=localKey(d); const list=tasksByDay[k]||[];
+    if(skipEmpty && !list.length) return "";
+    return `<div class="cal-daysec ${k===todayK?'today':''}" data-day="${k}">
+      <div class="cal-dayhd">${d.toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'})}<span class="cnt">${list.length||''}</span></div>
+      ${list.length?`<div style="display:flex;flex-direction:column;gap:6px">${list.map(calPill).join("")}</div>`:'<div class="sub" style="color:var(--muted2)">No tasks</div>'}
+    </div>`;
+  }).join("");
 
   let body="";
-  if(view==="month"){
-    const y=ref.getFullYear(), m=ref.getMonth();
-    const first=new Date(y,m,1); const startDow=(first.getDay()+6)%7;
-    const daysInMonth=new Date(y,m+1,0).getDate();
-    const cells=[];
-    for(let i=0;i<startDow;i++){ const d=new Date(y,m,1-(startDow-i)); cells.push({date:d,out:true}); }
-    for(let d=1;d<=daysInMonth;d++) cells.push({date:new Date(y,m,d),out:false});
-    while(cells.length%7!==0){ const last=cells[cells.length-1].date; cells.push({date:new Date(last.getFullYear(),last.getMonth(),last.getDate()+1),out:true}); }
-    body=`<div class="calgrid">${dows.map(d=>`<div class="dow">${d}</div>`).join("")}${cells.map(c=>cellHtml(c.date,c.out,false)).join("")}</div>`;
-  } else if(view==="week"){
-    const monday=weekStart(ref); const cells=[];
-    for(let i=0;i<7;i++){ const d=new Date(monday); d.setDate(monday.getDate()+i); cells.push(d); }
-    body=`<div class="calgrid">${dows.map(d=>`<div class="dow">${d}</div>`).join("")}${cells.map(d=>cellHtml(d,false,true)).join("")}</div>`;
-  } else { // today
+  if(view==="today"){
     const k=localKey(ref); const list=tasksByDay[k]||[];
     body=`<div class="card sect">
       <h2>${ref.toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'})} <span class="cnt">${list.length}</span></h2>
       ${list.length?`<div style="display:flex;flex-direction:column;gap:6px">${list.map(calPill).join("")}</div>`:'<div class="empty">No active tasks starting on this day.</div>'}
     </div>`;
+  } else if(view==="week"){
+    const monday=weekStart(ref); const cells=[];
+    for(let i=0;i<7;i++){ const d=new Date(monday); d.setDate(monday.getDate()+i); cells.push(d); }
+    body = mobile
+      ? `<div class="cal-list">${dayList(cells,false)}</div>`
+      : `<div class="calgrid">${dows.map(d=>`<div class="dow">${d}</div>`).join("")}${cells.map(d=>cellHtml(d,false,true)).join("")}</div>`;
+  } else { // month
+    const y=ref.getFullYear(), m=ref.getMonth();
+    const daysInMonth=new Date(y,m+1,0).getDate();
+    if(mobile){
+      const days=[]; for(let d=1;d<=daysInMonth;d++) days.push(new Date(y,m,d));
+      const html=dayList(days,true);
+      body=`<div class="cal-list">${html||'<div class="empty">No active tasks starting this month.</div>'}</div>`;
+    } else {
+      const first=new Date(y,m,1); const startDow=(first.getDay()+6)%7;
+      const cells=[];
+      for(let i=0;i<startDow;i++){ const d=new Date(y,m,1-(startDow-i)); cells.push({date:d,out:true}); }
+      for(let d=1;d<=daysInMonth;d++) cells.push({date:new Date(y,m,d),out:false});
+      while(cells.length%7!==0){ const last=cells[cells.length-1].date; cells.push({date:new Date(last.getFullYear(),last.getMonth(),last.getDate()+1),out:true}); }
+      body=`<div class="calgrid">${dows.map(d=>`<div class="dow">${d}</div>`).join("")}${cells.map(c=>cellHtml(c.date,c.out,false)).join("")}</div>`;
+    }
   }
 
   const vbtn=(v,l)=>`<button class="chip ${view===v?'active':''}" data-calview="${v}">${l}</button>`;
@@ -2016,6 +2125,9 @@ function renderImportModal(){
   setInterval(()=>{ notificationScan(); }, 60000);
   setInterval(()=>{ if(!state.modal && !state.drawer) render(); }, 120000);
   setTimeout(notificationScan, 4000);
+  // Re-render when crossing the mobile/desktop breakpoint (calendar layout, etc.).
+  let _wasMobile=isMobile(), _rz;
+  window.addEventListener("resize", ()=>{ clearTimeout(_rz); _rz=setTimeout(()=>{ const now=isMobile(); if(now!==_wasMobile){ _wasMobile=now; if(!state.modal) renderContent(); } }, 200); });
 })();
 </script>
 
