@@ -152,6 +152,13 @@
   .s-approval{background:#3a2a14;color:#f5c542}
   .s-done{background:#143526;color:#5fd49b}
   .s-rec{background:#1f2f47;color:#8fb8e8}
+  /* status dropdown styled as a colored badge (inherits the s-* background/color) */
+  select.statussel{appearance:none;-webkit-appearance:none;-moz-appearance:none;border:1px solid var(--border2);
+    border-radius:20px;padding:4px 24px 4px 11px;font-size:11.5px;font-weight:600;cursor:pointer;outline:none;max-width:170px;
+    background-repeat:no-repeat;background-position:right 8px center;background-size:9px;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%23ffffff' stroke-width='3' stroke-opacity='.6'><path d='M6 9l6 6 6-6'/></svg>")}
+  select.statussel:hover{filter:brightness(1.08)}
+  select.statussel option{background:var(--card2);color:var(--text);font-weight:500}
   .pr{font-size:11px;font-weight:700;padding:2px 9px;border-radius:6px}
   .pr-Critical{background:var(--red);color:#fff}
   .pr-High{background:#7a3b16;color:#ffb27a}
@@ -897,6 +904,11 @@ function renderContent(){
 /* ---- Shared bits ----------------------------------------------------------- */
 function deptPill(d){ return `<span class="pill dpill" style="background:${DEPT_COLOR[d]||'var(--d-admin)'}">${esc(d)}</span>`; }
 function statusPill(s){ return `<span class="stat ${STATUS_CLASS[s]||'s-todo'}">${esc(s)}</span>`; }
+/* A status dropdown styled as a colored badge. Changing it saves immediately. */
+function statusSelect(t){
+  return `<select class="statussel ${STATUS_CLASS[t.status]||'s-todo'}" data-statussel="${t.id}">${
+    STATUSES.map(s=>`<option ${t.status===s?'selected':''}>${esc(s)}</option>`).join("")}</select>`;
+}
 function prPill(p){ return `<span class="pr pr-${p}">${esc(p)}</span>`; }
 function ownerAv(name){ const c=contactFor(name); const dep=c?c.department:null;
   return `<span class="avatar" style="width:24px;height:24px;font-size:10px;${dep?`background:${DEPT_COLOR[dep]};color:#10131a;border-color:transparent`:''}">${esc(initials(name||'?'))}</span>`; }
@@ -934,7 +946,8 @@ function taskRow(t){
     <td>${start}</td>
     <td>${due}</td>
     <td>${t.cadence&&t.cadence!=='None'?`<span class="pill" style="background:var(--card2);border-color:var(--border)">↻ ${esc(t.cadence)}</span>`:'<span style="color:var(--muted2)">—</span>'}</td>
-    <td>${statusPill(t.status)}</td>
+    <td><div data-stop="1">${statusSelect(t)}</div></td>
+    <td><div data-stop="1">${fileCell(t)}</div></td>
     <td style="color:var(--muted)">${t.lastUpdate?timeAgo(t.lastUpdate):'—'}</td>
     <td>
       <div class="rowact" data-stop="1">
@@ -947,13 +960,19 @@ function taskRow(t){
     </td>
   </tr>`;
 }
+/* Board "File" column cell: clickable "Open File" or "No file". */
+function fileCell(t){
+  const a = (t.attachments && t.attachments[0]) || null;
+  if(a && a.url) return `<a class="btn sm" href="${esc(a.url)}" target="_blank" rel="noreferrer" title="${esc(a.name||a.url)}" onclick="event.stopPropagation()">📎 Open File</a>`;
+  return '<span style="color:var(--muted2)">No file</span>';
+}
 
 function boardTable(tasks){
   if(!tasks.length) return `<div class="empty">No tasks match the current filters.</div>`;
   return `<div style="overflow-x:auto"><table>
     <thead><tr>
       <th>Task</th><th>Owner</th><th>Manager</th><th>Priority</th>
-      <th>Start</th><th>Due</th><th>Cadence</th><th>Status</th><th>Last Update</th><th>Actions</th>
+      <th>Start</th><th>Due</th><th>Cadence</th><th>Status</th><th>File</th><th>Last Update</th><th>Actions</th>
     </tr></thead>
     <tbody>${tasks.map(taskRow).join("")}</tbody>
   </table></div>`;
@@ -1075,6 +1094,11 @@ function bindBoard(c){
     else if(a==="ask") quickAskUpdate(t);
     else if(a==="edit") openTaskModal(t);
     else if(a==="del") deleteTask(t.id);
+  });
+  // Inline status dropdown — saves immediately on change.
+  c.querySelectorAll("[data-statussel]").forEach(el=>{
+    el.onclick=(e)=>e.stopPropagation();
+    el.onchange=()=>{ const t=state.tasks.find(x=>x.id===el.dataset.statussel); if(t) changeStatus(t, el.value); };
   });
 }
 
@@ -1327,7 +1351,7 @@ function renderTaskDrawer(){
     <div class="dbody">
       <div class="dsec" style="margin-bottom:14px">
         <div class="ht">Update Status</div>
-        <select id="dStatus" style="width:100%;background:var(--card);border:1px solid var(--border);color:var(--text);padding:9px 11px;border-radius:9px;font-size:13px;outline:none">
+        <select id="dStatus" class="statussel ${STATUS_CLASS[t.status]||'s-todo'}" style="width:100%;max-width:none;padding:9px 28px 9px 12px;font-size:13px;border-radius:9px">
           ${STATUSES.map(s=>`<option ${t.status===s?'selected':''}>${esc(s)}</option>`).join("")}
         </select>
       </div>
