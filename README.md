@@ -30,46 +30,30 @@ create the table (if needed) is in the comment at the bottom of `index.html`.
 You can also paste the Project URL + anon key in **Settings**, or set
 `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY`. The service role key is never used.
 
-## Email notifications (Google Apps Script)
-Notifications are **emailed to the task owner (cc manager)** on assign,
-almost-overdue (1 hour before due, by default), and overdue. The owner/manager
-emails come from the Team Directory. Sending is done by your **Google Apps Script
-web app**: the browser posts through the same-origin proxy `api/notify.js` (to
-avoid CORS) and the cron (`api/cron-reminders.js`) posts to the Apps Script URL
-directly. Repeat sends are prevented (tracked per task).
+## Email notifications (Google Apps Script time trigger)
+Notifications are emailed by a **Google Apps Script** that runs on a 5-minute time
+trigger: it reads tasks from Supabase, emails the **owner** when a task is assigned
+and the **owner + cc manager** when a task is almost due (1 hour before, by default)
+or overdue, then writes per-task flags back to Supabase so nothing is sent twice.
 
-### Deploy the Apps Script web app
-1. Open your Apps Script project (or **Extensions → Apps Script** from a Sheet).
-   Paste the `doPost(e)` function shown in the comment at the bottom of `index.html`.
-2. **Deploy → New deployment → Web app** → *Execute as:* **Me** → *Who has access:*
-   **Anyone** → **Deploy** → copy the **Web app URL** (ends in `/exec`).
-3. In the app: **Settings → Email Notifications** → paste that `/exec` URL →
-   set the reminder timing (default 1 hour) → **Save** → **Send test email**.
-4. Fill in each person's **Email** in **Settings → Team Directory** (required to
-   receive notifications), then **Save team**.
+The app's only job is to store the data the script needs — it writes each task's
+`ownerEmail` and `managerEmail` (from the Team Directory) into the task JSON. Due
+times are interpreted in `America/New_York` (DST-aware).
 
-### Vercel env vars (Project → Settings → Environment Variables)
-- `SUPABASE_URL` and `SUPABASE_ANON_KEY` (required; service role is never used)
-- `APPS_SCRIPT_URL` — your Apps Script `/exec` URL (used by the cron; otherwise the
-  cron reads the URL saved in the app's settings)
-- `CRON_SECRET` (recommended — pass it as `?key=` when calling the cron endpoint)
-- `REMINDER_TIMEZONE` (default `America/New_York` — DST-aware, so Eastern times are
-  always correct; change only if the team is in another timezone)
-- `REMINDER_LEAD_MIN` (minutes before due for the "almost due" reminder; default `60`)
-- `APP_URL` (optional — adds an "Open Task Board" link to the email)
+### Set up the script
+1. Copy `apps-script/email-notifications.gs` into your Apps Script project,
+   replacing the old Chat code (`sendChatNotifications` / `setupChatTrigger`).
+2. Set `SUPABASE_ANON_KEY` (same anon key the app uses) and optionally `APP_URL`.
+3. Run `setupTrigger()` once and authorize — it removes old triggers and creates
+   the every-5-minutes trigger on `sendTaskEmails`.
+4. Fill in each person's **Email** in the app's **Settings → Team Directory**, then
+   **Save team** (an owner with no email can't be notified).
 
-In-app reminders are checked every ~60s while someone has the board open; the cron
-covers the rest. Assigned-task emails fire instantly from the app.
-
-### 24/7 reminders (cron) — fire 1 hour before due
-`api/cron-reminders.js` runs server-side so reminders fire even when nobody has the
-board open. The `vercel.json` cron runs once per day (the max on Vercel's free Hobby
-plan), kept only as a backstop. For true 1-hour-before timing you need a check every
-~15 minutes:
-- **Free (any plan):** create a free job at https://cron-job.org that GETs
-  `https://YOUR-SITE/api/cron-reminders?key=YOUR_CRON_SECRET` every 15 minutes.
-- **Vercel Pro:** change the schedule in `vercel.json` to `*/15 * * * *` (every 15 min);
-  Vercel Cron sends the secret automatically.
+Because this script does all the sending, leave the **Settings → Email
+Notifications → Apps Script Web App URL** field **blank** so the app doesn't also
+try to send. The Vercel `api/notify.js` and `api/cron-reminders.js` functions stay
+dormant (no `APPS_SCRIPT_URL` / no cron job configured) and are not used in this
+setup.
 
 ## Notes
 - Each person sets their own name (top-right profile) — greeting and "My Tasks" are per-device.
