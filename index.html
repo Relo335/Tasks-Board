@@ -309,11 +309,21 @@ const DEPT_HEX = {
   Sales:"#f5c542", Managers:"#f0588b", Marketing:"#a06bff",
   Operations:"#4a90e2", Finance:"#3ec98a", Admin:"#8b95a5", Personal:"#d7dce3"
 };
-const STATUSES = ["To Do","In Progress","Waiting on Someone","Blocked","For Approval","Done","Recurring Done Today"];
+const STATUSES = ["To Do","In Progress","Stuck","For Approval","Completed/Approved"];
 const STATUS_CLASS = {
-  "To Do":"s-todo","In Progress":"s-prog","Waiting on Someone":"s-wait",
-  "Blocked":"s-block","For Approval":"s-approval","Done":"s-done","Recurring Done Today":"s-rec"
+  "To Do":"s-todo","In Progress":"s-prog","Stuck":"s-block",
+  "For Approval":"s-approval","Completed/Approved":"s-done"
 };
+const DONE_STATUS = "Completed/Approved";
+/* Map any legacy status/cadence values (from older tasks) to the current set. */
+function mapStatus(s){
+  if(s==="Waiting on Someone"||s==="Blocked") return "Stuck";
+  if(s==="Done"||s==="Recurring Done Today"||s==="Completed") return DONE_STATUS;
+  return STATUSES.includes(s) ? s : "To Do";
+}
+function mapCadence(c){ if(!c || c==="None") return "One Off"; return c; }
+function isDone(t){ return t.status===DONE_STATUS; }
+function isRecurring(t){ return ["Daily","Weekly","Bi-Weekly","Monthly"].includes(t.cadence); }
 /* Manager dropdown uses this exact list */
 const MANAGERS = ["Sammy","Lisa","Dyana","Leo","Dawn","Rob"];
 /* Only these users (by profile name) may add/edit/delete tasks. Everyone else
@@ -322,7 +332,7 @@ const MANAGERS = ["Sammy","Lisa","Dyana","Leo","Dawn","Rob"];
    NOTE: this is a UI guardrail, not security — there is no login. */
 const ADMINS = ["sammy","rob","robert"];
 const PRIORITIES = ["Critical","High","Normal","Low"];
-const CADENCES = ["None","Daily","Weekly","Monthly"];
+const CADENCES = ["One Off","Daily","Weekly","Bi-Weekly","Monthly"];
 const REMINDER_OPTIONS = [
   {v:15,l:"15 minutes before due"},{v:30,l:"30 minutes before due"},
   {v:60,l:"1 hour before due"},{v:120,l:"2 hours before due"},{v:1440,l:"1 day before due"}
@@ -401,7 +411,7 @@ function toast(msg){ const t=$("#toast"); t.textContent=msg; t.classList.add("sh
 function dueDateTime(t){ if(!t.dueDate) return null; return new Date(t.dueDate + "T" + (t.dueTime || "23:59")); }
 function startDateTime(t){ if(!t.startDate) return null; return new Date(t.startDate + "T" + (t.startTime || "00:00")); }
 function isOverdue(t){
-  if(t.status==="Done" || t.status==="Recurring Done Today" || t.status==="For Approval") return false;
+  if(isDone(t) || t.status==="For Approval") return false;
   const d = dueDateTime(t); if(!d) return false;
   return d.getTime() < Date.now();
 }
@@ -479,6 +489,8 @@ async function loadTasks(){
   }else{
     try{ state.tasks = JSON.parse(localStorage.getItem(LS.demo)||"[]"); }catch(e){ state.tasks=[]; }
   }
+  // Normalize any legacy status/cadence values so old tasks work with the new set.
+  state.tasks.forEach(t=>{ t.status=mapStatus(t.status); t.cadence=mapCadence(t.cadence); });
 }
 
 /* Stamp owner/manager emails onto the task so any consumer (the Apps Script
@@ -591,7 +603,7 @@ async function notificationScan(){
   const lead = (state.cfg.reminderLeadMin||120) * 60000;
   let changed=false;
   for(const t of state.tasks){
-    if(t.status==="Done"||t.status==="Recurring Done Today"||t.status==="For Approval") continue;
+    if(isDone(t)||t.status==="For Approval") continue;
     const d = dueDateTime(t); if(!d) continue;
     const n = ensureNotif(t);
     const ms = d.getTime() - Date.now();
@@ -610,7 +622,7 @@ function blankTask(){
     id:uid(), name:"", owner:"", manager:"", department:"Operations",
     priority:"Normal", status:"To Do", requiresApproval:false,
     startDate:todayStr(), startTime:"09:00", dueDate:todayStr(), dueTime:"17:00",
-    cadence:"None", lastUpdate:new Date().toISOString(), notes:"",
+    cadence:"One Off", lastUpdate:new Date().toISOString(), notes:"",
     links:[], attachments:[], comments:[], checklist:[], activity:[],
     notif:{assigned:false,almost:false,overdue:false,approval:false,lastOwner:""},
     createdAt:new Date().toISOString(), completedAt:null
@@ -627,7 +639,7 @@ async function saveTask(t, {isNew}={}){
   else { Object.assign(existing, t); t = existing; }
   const n = ensureNotif(t);
   // Re-arm the "For Approval" email if the task was re-opened to an active state.
-  if(t.status!=="For Approval" && t.status!=="Done" && t.status!=="Recurring Done Today") n.approval=false;
+  if(t.status!=="For Approval" && !isDone(t)) n.approval=false;
   await persistTask(t);
   if(isNew && t.owner){ await notifyAssigned(t, "created"); await persistTask(t); }
   else if(!isNew && t.owner && t.owner!==prevOwner){
@@ -654,6 +666,7 @@ function nextOccurrence(t){
     const d = new Date(dateStr+"T00:00");
     if(unit==="Daily") d.setDate(d.getDate()+1);
     else if(unit==="Weekly") d.setDate(d.getDate()+7);
+    else if(unit==="Bi-Weekly") d.setDate(d.getDate()+14);
     else if(unit==="Monthly") d.setMonth(d.getMonth()+1);
     return d.toISOString().slice(0,10);
   };
@@ -666,17 +679,17 @@ function nextOccurrence(t){
 
 async function markDone(t){
   // Approval workflow: an approval-required task is first submitted "For Approval"
-  // (which emails the manager); the manager then marks it Done/Completed.
-  if(t.requiresApproval && t.status!=="For Approval" && t.status!=="Done" && t.status!=="Recurring Done Today"){
+  // (which emails the manager); the manager then marks it Completed/Approved.
+  if(t.requiresApproval && t.status!=="For Approval" && !isDone(t)){
     return submitForApproval(t);
   }
-  const wasRecurring = t.cadence && t.cadence!=="None";
+  const recurring = isRecurring(t);   // One Off does not spawn a next task
   const alreadySpawned = t._spawned;
-  t.status = wasRecurring ? "Recurring Done Today" : "Done";
+  t.status = DONE_STATUS;
   t.completedAt = new Date().toISOString();
   t.lastUpdate = new Date().toISOString();
-  addActivity(t, "Marked "+t.status);
-  if(wasRecurring && !alreadySpawned){
+  addActivity(t, "Marked "+DONE_STATUS);
+  if(recurring && !alreadySpawned){
     t._spawned = true;
     await persistTask(t);
     const next = nextOccurrence(t);
@@ -686,7 +699,7 @@ async function markDone(t){
     toast(`Next ${t.cadence.toLowerCase()} task created for ${fmtDateTime(next.dueDate,next.dueTime)}`);
   }else{
     await persistTask(t);
-    toast("Task marked done");
+    toast("Task completed");
   }
   render();
 }
@@ -695,7 +708,7 @@ async function markDone(t){
    through the existing workflow so approval emails + recurring spawn still run. */
 async function changeStatus(t, s){
   if(!s || s===t.status) return;
-  if(s==="Done" || s==="Recurring Done Today") return markDone(t);
+  if(s===DONE_STATUS) return markDone(t);
   if(s==="For Approval") return submitForApproval(t);
   t.status = s;
   t.lastUpdate = new Date().toISOString();
@@ -777,17 +790,17 @@ function visibleTasks(){
     case "my": list=list.filter(t=>t.owner===state.user); break;
     case "overdue": list=list.filter(isOverdue); break;
     case "today": list=list.filter(isDueToday); break;
-    case "waiting": list=list.filter(t=>t.status==="Waiting on Someone"); break;
-    case "blocked": list=list.filter(t=>t.status==="Blocked"); break;
-    case "completed": list=list.filter(t=>t.status==="Done"||t.status==="Recurring Done Today"); break;
-    case "recurring": list=list.filter(t=>t.cadence && t.cadence!=="None"); break;
+    case "stuck": list=list.filter(t=>t.status==="Stuck"); break;
+    case "approval": list=list.filter(t=>t.status==="For Approval"); break;
+    case "completed": list=list.filter(isDone); break;
+    case "recurring": list=list.filter(isRecurring); break;
   }
   switch(state.dash){
-    case "active": list=list.filter(t=>t.status!=="Done"); break;
+    case "active": list=list.filter(t=>!isDone(t)); break;
     case "overdue": list=list.filter(isOverdue); break;
     case "today": list=list.filter(isDueToday); break;
-    case "waiting": list=list.filter(t=>t.status==="Waiting on Someone"); break;
-    case "blocked": list=list.filter(t=>t.status==="Blocked"); break;
+    case "stuck": list=list.filter(t=>t.status==="Stuck"); break;
+    case "approval": list=list.filter(t=>t.status==="For Approval"); break;
     case "completedWeek": list=list.filter(isCompletedThisWeek); break;
   }
   if(f.department) list=list.filter(t=>t.department===f.department);
@@ -805,7 +818,7 @@ function visibleTasks(){
   return list;
 }
 function isCompletedThisWeek(t){
-  if(t.status!=="Done"&&t.status!=="Recurring Done Today") return false;
+  if(!isDone(t)) return false;
   if(!t.completedAt) return false;
   const now=new Date(); const day=now.getDay(); const monday=new Date(now);
   monday.setDate(now.getDate()-((day+6)%7)); monday.setHours(0,0,0,0);
@@ -827,7 +840,7 @@ function navItem(key, icon, label, badge){
 
 function renderShell(){
   const overdueCount = state.tasks.filter(isOverdue).length;
-  const notifCount = overdueCount + state.tasks.filter(t=>t.status==="Blocked").length;
+  const notifCount = overdueCount + state.tasks.filter(t=>t.status==="Stuck").length;
   const app = $("#app");
   app.innerHTML = `
   <div class="app">
@@ -919,7 +932,7 @@ function filterBar(){
     opts.map(o=>`<option ${state.filt[key]===o?'selected':''}>${esc(o)}</option>`).join("")}</select>`;
   return `<div class="filters">
     ${chip("all","All")}${chip("my","My Tasks")}${chip("overdue","Overdue")}${chip("today","Due Today")}
-    ${chip("waiting","Waiting")}${chip("blocked","Blocked")}${chip("completed","Completed")}${chip("recurring","Recurring")}
+    ${chip("stuck","Stuck")}${chip("approval","For Approval")}${chip("completed","Completed")}${chip("recurring","Recurring")}
     ${sel("department","Department",DEPARTMENTS)}
     ${sel("owner","Owner",ownersList())}
     ${sel("manager","Manager",managersList())}
@@ -945,7 +958,7 @@ function taskRow(t){
     <td>${prPill(t.priority)}</td>
     <td>${start}</td>
     <td>${due}</td>
-    <td>${t.cadence&&t.cadence!=='None'?`<span class="pill" style="background:var(--card2);border-color:var(--border)">↻ ${esc(t.cadence)}</span>`:'<span style="color:var(--muted2)">—</span>'}</td>
+    <td>${isRecurring(t)?`<span class="pill" style="background:var(--card2);border-color:var(--border)">↻ ${esc(t.cadence)}</span>`:'<span style="color:var(--muted2)">One Off</span>'}</td>
     <td><div data-stop="1">${statusSelect(t)}</div></td>
     <td><div data-stop="1">${fileCell(t)}</div></td>
     <td style="color:var(--muted)">${t.lastUpdate?timeAgo(t.lastUpdate):'—'}</td>
@@ -983,11 +996,11 @@ function boardTable(tasks){
 
 /* ---- Dashboard ------------------------------------------------------------- */
 function viewDashboard(){
-  const active = state.tasks.filter(t=>t.status!=="Done").length;
+  const active = state.tasks.filter(t=>!isDone(t)).length;
   const overdue = state.tasks.filter(isOverdue).length;
   const today = state.tasks.filter(isDueToday).length;
-  const waiting = state.tasks.filter(t=>t.status==="Waiting on Someone").length;
-  const blocked = state.tasks.filter(t=>t.status==="Blocked").length;
+  const stuckN = state.tasks.filter(t=>t.status==="Stuck").length;
+  const approvalN = state.tasks.filter(t=>t.status==="For Approval").length;
   const doneWk = state.tasks.filter(isCompletedThisWeek).length;
   const kpi=(key,val,label,danger,acc)=>`
     <div class="kpi ${state.dash===key?'active':''} ${danger?'danger':''}" data-dash="${key}">
@@ -1006,8 +1019,8 @@ function viewDashboard(){
       ${kpi("active",active,"Active Tasks",false,"var(--accent)")}
       ${kpi("overdue",overdue,"Overdue",true,"var(--red)")}
       ${kpi("today",today,"Due Today",false,"var(--d-sales)")}
-      ${kpi("waiting",waiting,"Waiting on Someone",false,"var(--d-marketing)")}
-      ${kpi("blocked",blocked,"Blocked Tasks",blocked>0,"var(--red)")}
+      ${kpi("stuck",stuckN,"Stuck",stuckN>0,"var(--red)")}
+      ${kpi("approval",approvalN,"For Approval",false,"var(--d-sales)")}
       ${kpi("completedWeek",doneWk,"Completed This Week",false,"var(--d-finance)")}
     </div>
     ${state.dash?`<div class="filters"><span class="chip active">Filtered: ${esc(dashLabel())}</span><button class="btn sm" id="clearDash">✕ Show all tasks</button></div>`:''}
@@ -1018,7 +1031,7 @@ function viewDashboard(){
       </div>
       <div class="card sect">
         <h2>⚠ Stuck Tasks <span class="cnt">${stuck.length}</span></h2>
-        <div class="sub" style="margin:-6px 0 12px;color:var(--muted2)">No update 3+ days · past due · or blocked</div>
+        <div class="sub" style="margin:-6px 0 12px;color:var(--muted2)">No update 3+ days · past due · or marked Stuck</div>
         ${stuck.length?stuck.map(t=>`
           <div class="linkrow" data-open="${t.id}" style="cursor:pointer;border-bottom:1px solid var(--border)">
             ${ownerAv(t.owner)}
@@ -1031,15 +1044,15 @@ function viewDashboard(){
       </div>
     </div>`;
 }
-function dashLabel(){ return {active:"Active Tasks",overdue:"Overdue",today:"Due Today",waiting:"Waiting on Someone",blocked:"Blocked",completedWeek:"Completed This Week"}[state.dash]||""; }
+function dashLabel(){ return {active:"Active Tasks",overdue:"Overdue",today:"Due Today",stuck:"Stuck",approval:"For Approval",completedWeek:"Completed This Week"}[state.dash]||""; }
 function stuckTasks(){
   return state.tasks.filter(t=>{
-    if(t.status==="Done"||t.status==="Recurring Done Today") return false;
-    return t.status==="Blocked" || isOverdue(t) || daysSinceUpdate(t)>=3;
+    if(isDone(t)) return false;
+    return t.status==="Stuck" || isOverdue(t) || daysSinceUpdate(t)>=3;
   }).sort((a,b)=>(dueDateTime(a)||9e15)-(dueDateTime(b)||9e15));
 }
 function stuckReason(t){
-  if(t.status==="Blocked") return "blocked";
+  if(t.status==="Stuck") return "marked stuck";
   if(isOverdue(t)) return "past due";
   if(daysSinceUpdate(t)>=3) return "no update "+Math.floor(daysSinceUpdate(t))+"d";
   return "stuck";
@@ -1121,7 +1134,7 @@ function viewMyTasks(){
 function viewDepartments(){
   const cards = DEPARTMENTS.map(d=>{
     const tasks=state.tasks.filter(t=>t.department===d);
-    const open=tasks.filter(t=>t.status!=="Done"&&t.status!=="Recurring Done Today").length;
+    const open=tasks.filter(t=>!isDone(t)).length;
     const od=tasks.filter(isOverdue).length;
     const members=[...new Set(tasks.map(t=>t.owner).filter(Boolean).concat((state.cfg.team||[]).filter(m=>m.department===d).map(m=>m.name)))];
     return `<div class="card sect" style="margin-bottom:14px">
@@ -1139,13 +1152,13 @@ function viewDepartments(){
 
 /* ---- Recurring ------------------------------------------------------------- */
 function viewRecurring(){
-  const rec = state.tasks.filter(t=>t.cadence&&t.cadence!=="None")
+  const rec = state.tasks.filter(isRecurring)
     .sort((a,b)=>(dueDateTime(a)||9e15)-(dueDateTime(b)||9e15));
-  const groups = {Daily:[],Weekly:[],Monthly:[]};
+  const groups = {Daily:[],Weekly:[],"Bi-Weekly":[],Monthly:[]};
   rec.forEach(t=>{ (groups[t.cadence]||(groups[t.cadence]=[])).push(t); });
   return `<div class="page-head"><div><h1>Recurring Tasks</h1>
-    <div class="sub">When marked done, the next occurrence is created automatically at the same start &amp; due time.</div></div></div>
-    ${["Daily","Weekly","Monthly"].map(g=>`
+    <div class="sub">When completed, the next occurrence is created automatically at the same start &amp; due time. "One Off" tasks do not repeat.</div></div></div>
+    ${["Daily","Weekly","Bi-Weekly","Monthly"].map(g=>`
       <div class="card sect" style="margin-bottom:14px">
         <h2>↻ ${g} <span class="cnt">${groups[g].length}</span></h2>
         ${groups[g].length?boardTable(groups[g]):'<div class="empty">No '+g.toLowerCase()+' recurring tasks.</div>'}
@@ -1163,15 +1176,15 @@ function viewReports(){
   });
   const odTrend=weeks.map(wkStart=>{
     const wkEnd=new Date(wkStart); wkEnd.setDate(wkStart.getDate()+7);
-    const n=state.tasks.filter(t=>{ const d=dueDateTime(t); return d&&d>=wkStart&&d<wkEnd && (t.status!=="Done"&&t.status!=="Recurring Done Today") && d<new Date(); }).length;
+    const n=state.tasks.filter(t=>{ const d=dueDateTime(t); return d&&d>=wkStart&&d<wkEnd && !isDone(t) && d<new Date(); }).length;
     return {label:wkStart.toLocaleDateString(undefined,{month:'short',day:'numeric'}), n};
   });
   const byDept=DEPARTMENTS.map(d=>({label:d,n:state.tasks.filter(t=>t.department===d).length,color:DEPT_HEX[d]}));
   const owners=ownersList().map(o=>({label:o,n:state.tasks.filter(t=>t.owner===o).length})).filter(x=>x.n).sort((a,b)=>b.n-a.n).slice(0,10);
-  const recTotal=state.tasks.filter(t=>t.cadence&&t.cadence!=="None").length;
-  const recDone=state.tasks.filter(t=>t.cadence&&t.cadence!=="None"&&(t.status==="Done"||t.status==="Recurring Done Today")).length;
+  const recTotal=state.tasks.filter(isRecurring).length;
+  const recDone=state.tasks.filter(t=>isRecurring(t)&&isDone(t)).length;
   const recRate=recTotal?Math.round(recDone/recTotal*100):0;
-  const blocked=state.tasks.filter(t=>t.status==="Blocked").length;
+  const stuckN=state.tasks.filter(t=>t.status==="Stuck").length;
 
   const bars=(arr,colorFn)=>{ const max=Math.max(1,...arr.map(a=>a.n)); return arr.map(a=>`
     <div class="bar-row"><div class="bl" title="${esc(a.label)}">${esc(a.label)}</div>
@@ -1190,9 +1203,9 @@ function viewReports(){
       </div>
       <div class="bar-track" style="margin-top:12px"><div class="bar-fill" style="width:${recRate}%;background:var(--d-finance)"></div></div>
     </div>
-    <div class="card sect"><h2>Blocked Tasks</h2>
-      <div style="font-size:40px;font-weight:800;color:${blocked?'var(--red)':'var(--d-finance)'}">${blocked}</div>
-      <div class="sub">${blocked?'Needs attention — see Stuck Tasks on the dashboard.':'Nothing blocked right now.'}</div>
+    <div class="card sect"><h2>Stuck Tasks</h2>
+      <div style="font-size:40px;font-weight:800;color:${stuckN?'var(--red)':'var(--d-finance)'}">${stuckN}</div>
+      <div class="sub">${stuckN?'Needs attention — see Stuck Tasks on the dashboard.':'Nothing stuck right now.'}</div>
     </div>
   </div>`;
 }
@@ -1361,9 +1374,9 @@ function renderTaskDrawer(){
         </select>
       </div>
       <div class="qa">
-        ${(t.requiresApproval && t.status!=="For Approval" && t.status!=="Done" && t.status!=="Recurring Done Today")
+        ${(t.requiresApproval && t.status!=="For Approval" && !isDone(t))
           ? '<button class="btn sm" data-q="approval">🛡️ Submit for Approval</button>'
-          : '<button class="btn sm" data-q="done">✓ Mark '+((t.status==="For Approval")?"Approved / Done":"Done")+'</button>'}
+          : '<button class="btn sm" data-q="done">✓ Mark '+((t.status==="For Approval")?"Approved / Completed":"Completed")+'</button>'}
         <button class="btn sm" data-q="email">✉ Email Owner</button>
         <button class="btn sm" data-q="text">📱 Text Owner</button>
         ${isAdmin()?`
@@ -1379,7 +1392,7 @@ function renderTaskDrawer(){
         ${meta("Priority", prPill(t.priority))}
         ${meta("Status", statusPill(t.status))}
         ${meta("Requires Approval", t.requiresApproval?'🛡️ Yes':'No')}
-        ${meta("Cadence", t.cadence&&t.cadence!=='None'?'↻ '+esc(t.cadence):'—')}
+        ${meta("Cadence", isRecurring(t)?'↻ '+esc(t.cadence):esc(t.cadence||'One Off'))}
         ${meta("Start", fmtDateTime(t.startDate,t.startTime))}
         ${meta("Due", `<span class="${od?'overdue-txt':''}">${fmtDateTime(t.dueDate,t.dueTime)}</span>`)}
         ${meta("Last Update", t.lastUpdate?fmtFull(t.lastUpdate):'—')}
@@ -1705,8 +1718,8 @@ function rowsToTasks(rows){
     if(o.manager) t.manager=o.manager;
     t.department=matchOne(o.department, DEPARTMENTS, "Operations");
     t.priority=matchOne(o.priority, PRIORITIES, "Normal");
-    t.status=matchOne(o.status, STATUSES, "To Do");
-    t.cadence=matchOne(o.cadence, CADENCES, "None");
+    t.status=matchOne(o.status, STATUSES, "") || mapStatus(o.status);
+    t.cadence=matchOne(o.cadence, CADENCES, "One Off");
     t.requiresApproval=/^(yes|y|true|1)$/i.test(o.requiresApproval||"");
     if(o.startDate) t.startDate=normDate(o.startDate);
     if(o.startTime) t.startTime=normTime(o.startTime);

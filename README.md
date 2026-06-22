@@ -7,7 +7,7 @@ if Supabase is unreachable the app runs in local **demo mode** via `localStorage
 
 ## Features
 - Sidebar: Dashboard, Calendar, Tasks Board, My Tasks, Departments, Recurring Tasks, Reports, Settings
-- Clickable KPI dashboard cards (Active, Overdue, Due Today, Waiting, Blocked, Completed This Week)
+- Clickable KPI dashboard cards (Active, Overdue, Due Today, Stuck, For Approval, Completed This Week)
 - Collapsible department sections, full task table, right-side task detail drawer
 - Calendar with department-colored pills, owner initials, "+X more", and a day drawer
 - Filter chips + dropdown filters (Department, Owner, Manager, Priority, Cadence, Status)

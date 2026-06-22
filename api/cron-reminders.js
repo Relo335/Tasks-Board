@@ -20,6 +20,9 @@
 //   APP_URL               optional — adds an "Open Task Board" link
 //   RESEND_API_KEY, RESEND_FROM   required to actually send the email
 
+// Treat the current "Completed/Approved" plus any legacy done statuses as done.
+function isDoneStatus(s){ return ["Completed/Approved","Done","Recurring Done Today","Completed"].includes(s); }
+
 // --- self-contained email helpers (no external imports) --------------------
 function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function escAttr(s){ return String(s==null?"":s).replace(/"/g,"%22"); }
@@ -155,7 +158,7 @@ export default async function handler(req, res) {
       }
 
       // Due reminders -> owner + cc manager (skip done / approval-pending)
-      if (t.status !== "Done" && t.status !== "Recurring Done Today" && t.status !== "For Approval") {
+      if (!isDoneStatus(t.status) && t.status !== "For Approval") {
         const due = dueInstant(t);
         if (due != null) {
           const ms = due - now;
