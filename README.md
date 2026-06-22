@@ -32,10 +32,31 @@ You can also paste the Project URL + anon key in **Settings**, or set
 
 ## Google Chat notifications
 Browsers block direct posts to `chat.googleapis.com` (CORS), so notifications go
-through a tiny serverless proxy. Create `api/chat-notify.js` on Vercel (full code
-is in the comment at the bottom of `index.html`), then set the webhook URL and
-endpoint (`/api/chat-notify`) in **Settings → Google Chat** and click
-"Send test message".
+through a tiny serverless proxy (`api/chat-notify.js`, already in this repo).
+Set the webhook URL and endpoint (`/api/chat-notify`) in **Settings → Google Chat**
+and click "Send test message".
+
+In-app reminders (almost-overdue / overdue) are only checked while someone has the
+board open in a browser tab.
+
+### 24/7 reminders (Vercel Cron)
+`api/cron-reminders.js` runs server-side so reminders fire even when nobody has
+the board open. It reads tasks from Supabase, sends Google Chat alerts, and writes
+back per-task flags so nothing is sent twice. `vercel.json` schedules it.
+
+Set these Vercel env vars (Project → Settings → Environment Variables):
+- `SUPABASE_URL` and `SUPABASE_ANON_KEY` (required; service role is never used)
+- `GOOGLE_CHAT_WEBHOOK` (optional — otherwise it uses the webhook saved in the app)
+- `CRON_SECRET` (recommended — Vercel Cron sends it automatically; external crons pass `?key=`)
+- `REMINDER_TZ_OFFSET_MINUTES` (your UTC offset so wall-clock due times resolve correctly,
+  e.g. EST `-300`, EDT `-240`, CST `-360`, PST `-480`; default `0`)
+- `APP_URL` (optional — adds an "Open Task Board" link to messages)
+
+**Frequency:** the default schedule is once per day (the max on Vercel's free Hobby
+plan). For "1 hour before due" / "15 min before" reminders you need finer granularity:
+- **Vercel Pro:** change the schedule in `vercel.json` to `*/15 * * * *` (every 15 min).
+- **Free alternative:** keep Hobby and use a free external cron (e.g. cron-job.org) to
+  hit `https://YOUR-SITE/api/cron-reminders?key=YOUR_CRON_SECRET` every 15 minutes.
 
 ## Notes
 - Each person sets their own name (top-right profile) — greeting and "My Tasks" are per-device.
