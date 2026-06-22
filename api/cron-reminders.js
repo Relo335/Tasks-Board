@@ -1,21 +1,20 @@
 // api/cron-reminders.js — Vercel serverless function (Node.js 18+ runtime)
 //
 // Server-side reminder scan. Runs on a schedule (Vercel Cron or any external
-// cron) so almost-overdue and overdue Google Chat notifications fire even when
-// nobody has the task board open in a browser.
+// cron) so almost-overdue and overdue email notifications fire even when nobody
+// has the task board open in a browser.
 //
 // It reads tasks straight from Supabase (anon key — service role is NOT used),
-// sends each reminder as a PRIVATE Google Chat DM to the task owner (falling
-// back to a shared-space webhook if the owner has no Chat user id), and writes
-// back per-task notif flags so reminders are never sent twice.
+// emails each reminder to the task owner (cc manager) by posting to your Google
+// Apps Script web app, and writes back per-task notif flags so reminders are
+// never sent twice (matches the in-app logic).
 //
 // Required environment variables (Vercel -> Project -> Settings -> Environment Variables):
 //   SUPABASE_URL                e.g. https://qegyeuaeggaxxebixwsz.supabase.co
 //   SUPABASE_ANON_KEY           the anon public key
-//   GCHAT_SA_EMAIL              Chat bot service-account email (for private DMs)
-//   GCHAT_SA_PRIVATE_KEY        Chat bot service-account private key (PEM)
 // Optional:
-//   GOOGLE_CHAT_WEBHOOK         shared-space webhook used as a fallback only
+//   APPS_SCRIPT_URL             your Apps Script /exec URL (otherwise read from the
+//                               URL saved in the app's settings)
 //   CRON_SECRET                 if set, requests must include it (Vercel Cron sends it
 //                               automatically as "Authorization: Bearer <CRON_SECRET>";
 //                               external crons can pass ?key=<CRON_SECRET>)
@@ -23,8 +22,7 @@
 //                               Default "America/New_York" (handles EST/EDT automatically).
 //   REMINDER_LEAD_MIN           minutes before due to send the "almost due" reminder.
 //                               Falls back to the app's saved setting, else 60 (1 hour).
-
-import { sendDirectMessage, sendSpaceMessage } from "../lib/gchat.js";
+//   APP_URL                     adds an "Open Task Board" link to the email.
 
 export default async function handler(req, res) {
   // --- auth -----------------------------------------------------------------
@@ -77,14 +75,11 @@ export default async function handler(req, res) {
     const settings = (settingsRow && settingsRow.data) || {};
     const team = settings.team || [];
     const memberFor = (name) => team.find((m) => m.name === name);
-    const webhook = process.env.GOOGLE_CHAT_WEBHOOK || settings.googleChatWebhook || "";
-    const saEmail = process.env.GCHAT_SA_EMAIL;
-    const saPrivateKey = process.env.GCHAT_SA_PRIVATE_KEY;
-    const canDM = !!(saEmail && saPrivateKey);
+    const appsScriptUrl = process.env.APPS_SCRIPT_URL || settings.appsScriptUrl || "";
     const leadMin = parseInt(process.env.REMINDER_LEAD_MIN, 10) || settings.reminderLeadMin || 60;
     const leadMs = leadMin * 60000;
-    if (!canDM && !webhook) {
-      res.status(200).json({ ok: true, sent: 0, note: "No Chat bot credentials or webhook configured" });
+    if (!appsScriptUrl) {
+      res.status(200).json({ ok: true, sent: 0, note: "No Apps Script URL configured" });
       return;
     }
 
@@ -95,8 +90,6 @@ export default async function handler(req, res) {
     const now = Date.now();
     const dueInstant = (t) => {
       if (!t.dueDate) return null;
-      // Treat the stored wall-clock as UTC first, then correct by the TZ offset
-      // at that moment (DST-aware) to get the real instant.
       const ms = Date.parse(`${t.dueDate}T${t.dueTime || "23:59"}:00Z`);
       if (isNaN(ms)) return null;
       return ms - tzOffsetMs(TZ, new Date(ms));
@@ -107,36 +100,40 @@ export default async function handler(req, res) {
       return timeStr ? `${dateStr} ${timeStr} ET` : dateStr;
     };
 
-    const send = async (task, kind) => {
-      const text = [
-        `*${kind}*`,
-        `*Task:* ${task.name}`,
-        `*Owner:* ${task.owner || "—"}`,
-        `*Manager:* ${task.manager || "—"}`,
-        `*Department:* ${task.department || "—"}`,
-        `*Priority:* ${task.priority || "—"}`,
-        `*Status:* ${task.status || "—"}`,
-        `*Start:* ${fmt(task.startDate, task.startTime)}`,
-        `*Due:* ${fmt(task.dueDate, task.dueTime)}`,
-        process.env.APP_URL ? `<${process.env.APP_URL}|Open Task Board>` : "",
-      ].filter(Boolean).join("\n");
-
-      // Prefer a private DM to the owner; fall back to the shared-space webhook.
-      const member = memberFor(task.owner);
-      const userId = member && member.chatUserId;
-      if (canDM && userId) {
-        try {
-          await sendDirectMessage({ saEmail, saPrivateKey, userId, text });
-          return true;
-        } catch (e) {
-          console.warn("DM failed for " + task.owner + ":", e.message);
-        }
+    // Email the owner (cc manager) via the Apps Script web app.
+    const send = async (task, kind, event) => {
+      const owner = memberFor(task.owner);
+      const manager = memberFor(task.manager);
+      const to = owner && owner.email;
+      if (!to) { console.warn("No owner email for", task.owner); return false; }
+      const payload = {
+        event,
+        subject: `${kind}: ${task.name}`,
+        to,
+        cc: (manager && manager.email) || "",
+        task: {
+          name: task.name, owner: task.owner, manager: task.manager,
+          department: task.department, priority: task.priority, status: task.status,
+          startDate: task.startDate, startTime: task.startTime,
+          dueDate: task.dueDate, dueTime: task.dueTime,
+          start: fmt(task.startDate, task.startTime),
+          due: fmt(task.dueDate, task.dueTime),
+          notes: task.notes || "",
+          link: process.env.APP_URL || "",
+        },
+      };
+      try {
+        const r = await fetch(appsScriptUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          redirect: "follow",
+        });
+        return r.ok;
+      } catch (e) {
+        console.warn("Email send failed for " + task.owner + ":", e.message);
+        return false;
       }
-      if (webhook) {
-        try { return await sendSpaceMessage(webhook, text); }
-        catch (e) { console.warn("Space message failed:", e.message); }
-      }
-      return false;
     };
 
     const changed = [];
@@ -147,9 +144,9 @@ export default async function handler(req, res) {
       const n = t.notif || (t.notif = { assigned: false, almost: false, overdue: false, lastOwner: t.owner || "" });
       const ms = due - now;
       if (ms <= 0) {
-        if (!n.overdue && (await send(t, "🔴 Task Overdue"))) { n.overdue = true; changed.push(t); }
+        if (!n.overdue && (await send(t, "Task Overdue", "overdue"))) { n.overdue = true; changed.push(t); }
       } else if (ms <= leadMs) {
-        if (!n.almost && (await send(t, "🟠 Task Almost Due"))) { n.almost = true; changed.push(t); }
+        if (!n.almost && (await send(t, "Task Almost Due", "almost_due"))) { n.almost = true; changed.push(t); }
       }
     }
 
