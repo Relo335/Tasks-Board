@@ -11,10 +11,12 @@ if Supabase is unreachable the app runs in local **demo mode** via `localStorage
 - Collapsible department sections, full task table, right-side task detail drawer
 - Calendar with department-colored pills, owner initials, "+X more", and a day drawer
 - Filter chips + dropdown filters (Department, Owner, Manager, Priority, Cadence, Status)
-- Quick actions: Ask for Update, Email Owner, Text Owner, Mark Done, Move Due Date, Edit, Delete
+- Quick actions: Ask for Update, Email Owner, Text Owner, Mark Done / Submit for Approval, Move Due Date, Edit, Delete
 - Recurring tasks auto-spawn the next occurrence (same start/due time) when marked done
+- Approval workflow: tasks flagged "Requires Approval" are submitted **For Approval** (emails the manager), and the manager marks them Done
+- File / attachment link per task (Google Drive, Dropbox, or any URL), shown on the board and in the drawer
 - Stuck Tasks (no update 3+ days / past due / blocked), Task Templates, and Reports
-- Email notifications to the owner (assigned / almost-overdue / overdue) with repeat prevention
+- Email notifications (assigned → owner; due-soon + overdue → owner & manager; approval → manager) with per-task repeat prevention
 
 ## Deploy (Vercel, static — nothing to build)
 1. Import this repo in Vercel → Add New → Project.
@@ -30,30 +32,49 @@ create the table (if needed) is in the comment at the bottom of `index.html`.
 You can also paste the Project URL + anon key in **Settings**, or set
 `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY`. The service role key is never used.
 
-## Email notifications (Google Apps Script time trigger)
-Notifications are emailed by a **Google Apps Script** that runs on a 5-minute time
-trigger: it reads tasks from Supabase, emails the **owner** when a task is assigned
-and the **owner + cc manager** when a task is almost due (1 hour before, by default)
-or overdue, then writes per-task flags back to Supabase so nothing is sent twice.
+## Email notifications (Resend serverless function)
+Emails are sent by the serverless function **`api/send-email.js`** (shared helper
+`lib/email.js`) using **Resend**. The browser never holds an API key — it POSTs the
+recipients + task fields to `/api/send-email`, which sends the message. Triggers:
 
-The app's only job is to store the data the script needs — it writes each task's
-`ownerEmail` and `managerEmail` (from the Team Directory) into the task JSON. Due
-times are interpreted in `America/New_York` (DST-aware).
+| Event | Recipient | Tracking flag |
+|---|---|---|
+| Task assigned (new owner / owner change) | owner | `notif.assigned` |
+| Due soon (2 hours before, by default) | owner + cc manager | `notif.almost` |
+| Overdue | owner + cc manager | `notif.overdue` |
+| Marked **For Approval** | manager | `notif.approval` |
 
-### Set up the script
-1. Copy `apps-script/email-notifications.gs` into your Apps Script project,
-   replacing the old Chat code (`sendChatNotifications` / `setupChatTrigger`).
-2. Set `SUPABASE_ANON_KEY` (same anon key the app uses) and optionally `APP_URL`.
-3. Run `setupTrigger()` once and authorize — it removes old triggers and creates
-   the every-5-minutes trigger on `sendTaskEmails`.
-4. Fill in each person's **Email** in the app's **Settings → Team Directory**, then
-   **Save team** (an owner with no email can't be notified).
+All flags live inside each task's `data` JSON, so reminders are never sent twice.
+While the board is open the app checks every ~60s; `api/cron-reminders.js` covers
+the same logic on a schedule so emails fire even when nobody has the board open.
 
-Because this script does all the sending, leave the **Settings → Email
-Notifications → Apps Script Web App URL** field **blank** so the app doesn't also
-try to send. The Vercel `api/notify.js` and `api/cron-reminders.js` functions stay
-dormant (no `APPS_SCRIPT_URL` / no cron job configured) and are not used in this
-setup.
+### Set up Resend
+1. Create a free account at [resend.com](https://resend.com) and add an **API key**.
+2. To email anyone other than yourself, **verify a sending domain** in Resend.
+3. In Vercel → Project → Settings → **Environment Variables**, add:
+   - `RESEND_API_KEY` = `re_…`
+   - `RESEND_FROM` = `Task Board <tasks@yourdomain.com>` (a verified sender; defaults
+     to Resend's `onboarding@resend.dev`, which only delivers to your own account)
+4. In the app → **Settings → Team & Email Addresses**, enter each owner's and
+   manager's email, **Save team**, then click **Send test email**.
+
+> Prefer SendGrid or another provider? Swap the one `fetch` call inside
+> `lib/email.js` (`https://api.resend.com/emails`) for that provider's API — the
+> rest of the app is unchanged.
+
+### Cron (so due-soon / overdue fire when the board is closed)
+`api/cron-reminders.js` reads Supabase and sends via Resend. Env vars:
+`SUPABASE_URL`, `SUPABASE_ANON_KEY`, `RESEND_API_KEY`, `RESEND_FROM`, optional
+`CRON_SECRET`, `REMINDER_TIMEZONE` (default `America/New_York`), `REMINDER_LEAD_MIN`
+(default `120`), `APP_URL`. The `vercel.json` cron is a daily backstop; for true
+2-hours-before timing, hit `https://YOUR-SITE/api/cron-reminders?key=CRON_SECRET`
+every ~15 min (free via cron-job.org, or Vercel Pro `*/15 * * * *`).
+
+### Managers & approval
+The manager dropdown uses a fixed list: **Sammy, Lisa, Dyana, Leo, Dawn, Rob**
+(seeded in the Team directory so you can set their emails). When a task has
+**Requires Approval = Yes**, "Mark Done" instead submits it **For Approval** and
+emails the manager; the manager then marks it Done.
 
 ## Notes
 - Each person sets their own name (top-right profile) — greeting and "My Tasks" are per-device.
