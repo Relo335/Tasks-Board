@@ -120,6 +120,13 @@ export default async function handler(req, res) {
       if (isNaN(ms)) return null;
       return ms - tzOffsetMs(TZ, new Date(ms));
     };
+    // A task has "started" once its Start Date/Time is reached (no start = started).
+    const hasStarted = (t) => {
+      if (!t.startDate) return true;
+      const ms = Date.parse(`${t.startDate}T${t.startTime || "00:00"}:00Z`);
+      if (isNaN(ms)) return true;
+      return (ms - tzOffsetMs(TZ, new Date(ms))) <= now;
+    };
     const fmt = (dateStr, timeStr) => (!dateStr ? "—" : (timeStr ? `${dateStr} ${timeStr} ET` : dateStr));
 
     const emailTask = async (to, cc, kind, t) => {
@@ -162,8 +169,8 @@ export default async function handler(req, res) {
         await emailTask(managerEmail, "", "Task Ready For Approval", t);
       }
 
-      // Due reminders -> owner + cc manager
-      if (t.status !== "For Approval") {
+      // Due reminders -> owner + cc manager (only once a task has started)
+      if (t.status !== "For Approval" && hasStarted(t)) {
         const due = dueInstant(t);
         if (due != null) {
           const ms = due - now;

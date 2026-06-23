@@ -418,6 +418,12 @@ function isRecurring(t){ return ["Daily","Weekly","Bi-Weekly","Monthly","Quarter
 function isDeleted(t){ return t.deleted===true; }
 function isCompleted(t){ return t.archived===true || isDone(t); }
 function isActive(t){ return !isCompleted(t) && !isDeleted(t); }
+/* A task has "started" once its Start Date/Time is now or in the past (no start
+   date = treated as started). Future-scheduled active tasks are hidden from the
+   active board but kept in Supabase and shown on the calendar / Scheduled view. */
+function hasStarted(t){ const s=startDateTime(t); return !s || s.getTime() <= Date.now(); }
+function isFuture(t){ const s=startDateTime(t); return !!s && s.getTime() > Date.now(); }
+function isScheduledFuture(t){ return isActive(t) && isFuture(t); }
 /* Manager dropdown uses this exact list */
 const MANAGERS = ["Sammy","Lisa","Dyana","Leo","Dawn","Rob"];
 /* Only these users (by profile name) may add/edit/delete tasks. Everyone else
@@ -723,6 +729,7 @@ async function notificationScan(){
     let changed=false;
     for(const t of state.tasks){
       if(t.deleted || t.archived || isDone(t) || t.status==="For Approval") continue;
+      if(!hasStarted(t)) continue;          // no due reminders before a task has started
       const d = dueDateTime(t); if(!d) continue;
       const n = ensureNotif(t);
       const ms = d.getTime() - Date.now();
@@ -938,6 +945,9 @@ function visibleTasks(){
   // The active board shows only active tasks; completed/archived tasks appear
   // only when the Completed view (chip, dashboard card, or status filter) is on.
   if(!showingCompleted()) list = list.filter(isActive);
+  // Hide future-scheduled tasks from the active board until their Start Date/Time
+  // arrives — except when explicitly viewing Completed or the Scheduled filter.
+  if(!showingCompleted() && state.chip!=="scheduled" && state.dash!=="scheduled") list = list.filter(hasStarted);
 
   switch(state.chip){
     case "my": list=list.filter(t=>t.owner===state.user); break;
@@ -945,6 +955,7 @@ function visibleTasks(){
     case "today": list=list.filter(isDueToday); break;
     case "stuck": list=list.filter(t=>t.status==="Stuck"); break;
     case "approval": list=list.filter(t=>t.status==="For Approval"); break;
+    case "scheduled": list=list.filter(isFuture); break;   // future-start tasks not yet active
     case "completed": list=list.filter(isCompleted); break;
     case "recurring": list=list.filter(isRecurring); break;
   }
@@ -954,6 +965,7 @@ function visibleTasks(){
     case "today": list=list.filter(isDueToday); break;
     case "stuck": list=list.filter(t=>t.status==="Stuck"); break;
     case "approval": list=list.filter(t=>t.status==="For Approval"); break;
+    case "scheduled": list=list.filter(isFuture); break;
     case "completedWeek": list=list.filter(isCompletedThisWeek); break;
   }
   if(f.department) list=list.filter(t=>t.department===f.department);
@@ -1089,7 +1101,7 @@ function filterBar(){
     opts.map(o=>`<option ${state.filt[key]===o?'selected':''}>${esc(o)}</option>`).join("")}</select>`;
   return `<div class="filters">
     ${chip("all","All")}${chip("my","My Tasks")}${chip("overdue","Overdue")}${chip("today","Due Today")}
-    ${chip("stuck","Stuck")}${chip("approval","For Approval")}${chip("completed","Completed")}${chip("recurring","Recurring")}
+    ${chip("stuck","Stuck")}${chip("approval","For Approval")}${chip("scheduled","Scheduled")}${chip("completed","Completed")}${chip("recurring","Recurring")}
     ${sel("department","Department",DEPARTMENTS)}
     ${sel("owner","Owner",ownersList())}
     ${sel("manager","Manager",managersList())}
@@ -1154,10 +1166,12 @@ function boardTable(tasks){
 /* ---- Dashboard ------------------------------------------------------------- */
 function viewDashboard(){
   const live = state.tasks.filter(t=>!t.deleted);
-  const active = live.filter(isActive).length;
-  const overdue = live.filter(t=>isActive(t)&&isOverdue(t)).length;
-  const today = live.filter(t=>isActive(t)&&isDueToday(t)).length;
-  const stuckN = live.filter(t=>t.status==="Stuck").length;
+  // "Active" counts only tasks that have actually started (Start Date/Time reached).
+  const active = live.filter(t=>isActive(t)&&hasStarted(t)).length;
+  const overdue = live.filter(t=>isActive(t)&&hasStarted(t)&&isOverdue(t)).length;
+  const today = live.filter(t=>isActive(t)&&hasStarted(t)&&isDueToday(t)).length;
+  const scheduledN = live.filter(isScheduledFuture).length;
+  const stuckN = live.filter(t=>t.status==="Stuck"&&hasStarted(t)).length;
   const approvalN = live.filter(t=>t.status==="For Approval").length;
   const doneWk = live.filter(isCompletedThisWeek).length;
   const kpi=(key,val,label,danger,acc)=>`
@@ -1177,6 +1191,7 @@ function viewDashboard(){
       ${kpi("active",active,"Active Tasks",false,"var(--accent)")}
       ${kpi("overdue",overdue,"Overdue",true,"var(--red)")}
       ${kpi("today",today,"Due Today",false,"var(--d-sales)")}
+      ${kpi("scheduled",scheduledN,"Scheduled",false,"var(--d-marketing)")}
       ${kpi("stuck",stuckN,"Stuck",stuckN>0,"var(--red)")}
       ${kpi("approval",approvalN,"For Approval",false,"var(--d-sales)")}
       ${kpi("completedWeek",doneWk,"Completed This Week",false,"var(--d-finance)")}
@@ -1202,10 +1217,10 @@ function viewDashboard(){
       </div>
     </div>`;
 }
-function dashLabel(){ return {active:"Active Tasks",overdue:"Overdue",today:"Due Today",stuck:"Stuck",approval:"For Approval",completedWeek:"Completed This Week"}[state.dash]||""; }
+function dashLabel(){ return {active:"Active Tasks",overdue:"Overdue",today:"Due Today",scheduled:"Scheduled (future)",stuck:"Stuck",approval:"For Approval",completedWeek:"Completed This Week"}[state.dash]||""; }
 function stuckTasks(){
   return state.tasks.filter(t=>{
-    if(t.deleted || isDone(t)) return false;
+    if(t.deleted || isDone(t) || !hasStarted(t)) return false;   // not-yet-started tasks can't be stuck
     return t.status==="Stuck" || isOverdue(t) || daysSinceUpdate(t)>=3;
   }).sort((a,b)=>(dueDateTime(a)||9e15)-(dueDateTime(b)||9e15));
 }
@@ -1292,7 +1307,7 @@ function viewMyTasks(){
 function viewDepartments(){
   const cards = DEPARTMENTS.map(d=>{
     const all=state.tasks.filter(t=>t.department===d);
-    const tasks=all.filter(isActive);                 // active board view (no completed)
+    const tasks=all.filter(t=>isActive(t)&&hasStarted(t));   // active board view (no completed, no future)
     const open=tasks.length;
     const od=tasks.filter(isOverdue).length;
     const members=[...new Set(all.map(t=>t.owner).filter(Boolean).concat((state.cfg.team||[]).filter(m=>m.department===d).map(m=>m.name)))];
