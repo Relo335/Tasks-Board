@@ -698,34 +698,42 @@ async function notifyAssigned(t, reason){
   const n = ensureNotif(t);
   if(!t.owner) return;
   if(reason==="created" && n.assigned) return;
-  const ok = await sendEmail(t, "Task Assigned", "assigned");
-  if(ok){ n.assigned = true; n.lastOwner = t.owner; }
+  // Mark BEFORE sending so a failed/rate-limited send is never retried in a loop.
+  n.assigned = true; n.lastOwner = t.owner;
+  sendEmail(t, "Task Assigned", "assigned");
 }
 
 /* Email the manager once when a task enters "For Approval". */
 async function notifyApproval(t){
   const n = ensureNotif(t);
   if(t.status!=="For Approval" || n.approval) return;
-  const ok = await sendEmail(t, "Task Ready For Approval", "approval");
-  if(ok) n.approval = true;
+  n.approval = true;                 // mark once; do not retry on failure
+  sendEmail(t, "Task Ready For Approval", "approval");
 }
 
-/* Periodic scan for due-soon (2h) + overdue notifications (prevents repeats) */
+/* Periodic scan for due-soon (2h) + overdue notifications.
+   Each reminder is sent at most ONCE per task: the tracking flag is set and
+   persisted before/independent of the send result, so a Resend rate-limit or
+   5xx never causes the 60s scan to retry the same task again and again. */
+let _scanning = false;
 async function notificationScan(){
-  const lead = (state.cfg.reminderLeadMin||120) * 60000;
-  let changed=false;
-  for(const t of state.tasks){
-    if(isDone(t)||t.status==="For Approval") continue;
-    const d = dueDateTime(t); if(!d) continue;
-    const n = ensureNotif(t);
-    const ms = d.getTime() - Date.now();
-    if(ms <= 0){
-      if(!n.overdue){ const ok=await sendEmail(t,"Task Overdue","overdue"); if(ok){n.overdue=true; changed=true; await persistTask(t);} }
-    }else if(ms <= lead){
-      if(!n.almost){ const ok=await sendEmail(t,"Task Due Soon","almost_due"); if(ok){n.almost=true; changed=true; await persistTask(t);} }
+  if(_scanning) return; _scanning = true;        // never overlap scans
+  try{
+    const lead = (state.cfg.reminderLeadMin||120) * 60000;
+    let changed=false;
+    for(const t of state.tasks){
+      if(t.deleted || t.archived || isDone(t) || t.status==="For Approval") continue;
+      const d = dueDateTime(t); if(!d) continue;
+      const n = ensureNotif(t);
+      const ms = d.getTime() - Date.now();
+      if(ms <= 0){
+        if(!n.overdue){ n.overdue=true; changed=true; await persistTask(t); sendEmail(t,"Task Overdue","overdue"); }
+      }else if(ms <= lead){
+        if(!n.almost){ n.almost=true; changed=true; await persistTask(t); sendEmail(t,"Task Due Soon","almost_due"); }
+      }
     }
-  }
-  if(changed) render();
+    if(changed) render();
+  } finally { _scanning=false; }
 }
 
 /* ---- Task operations ------------------------------------------------------- */
@@ -2100,8 +2108,14 @@ async function doImport(tasks, sendEmails){
   const go=$("#importGo"); if(go){ go.disabled=true; go.textContent="Importing…"; }
 
   const list = tasks.slice();
+  const lead = (state.cfg.reminderLeadMin||120) * 60000;
   for(const t of list){
-    if(!sendEmails) ensureNotif(t).assigned=true;      // suppress assignment email unless asked
+    const n = ensureNotif(t);
+    if(!sendEmails) n.assigned=true;                   // suppress assignment email unless asked
+    // Suppress the reminder backlog: imported tasks already past-due / due-soon
+    // must NOT blast overdue/due-soon emails. Future tasks still get one reminder.
+    const d = dueDateTime(t);
+    if(d){ const ms=d.getTime()-Date.now(); if(ms<=0){ n.overdue=true; n.almost=true; } else if(ms<=lead){ n.almost=true; } }
     addActivity(t, "Imported from spreadsheet");
     state.tasks.push(t);
   }
