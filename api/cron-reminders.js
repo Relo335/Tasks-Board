@@ -139,9 +139,11 @@ export default async function handler(req, res) {
       return r.ok;
     };
 
+    // Each flag is set the moment a send is attempted (not only on success), so a
+    // Resend rate-limit / 5xx is never retried on the next run in a re-blasting loop.
     const changed = [];
     for (const t of tasks) {
-      if (t.archived || isDoneStatus(t.status)) continue;   // completed/archived: no emails
+      if (t.deleted || t.archived || isDoneStatus(t.status)) continue;   // completed/archived/deleted: no emails
       const n = t.notif || (t.notif = { assigned: false, almost: false, overdue: false, approval: false, lastOwner: t.owner || "" });
       if (n.approval === undefined) n.approval = false;
       const ownerEmail = emailFor(t.owner, t.ownerEmail);
@@ -150,23 +152,25 @@ export default async function handler(req, res) {
 
       // Assigned -> owner
       if (t.owner && ownerEmail && !n.assigned) {
-        if (await emailTask(ownerEmail, "", "Task Assigned", t)) { n.assigned = true; n.lastOwner = t.owner; didChange = true; }
+        n.assigned = true; n.lastOwner = t.owner; didChange = true;
+        await emailTask(ownerEmail, "", "Task Assigned", t);
       }
 
       // For Approval -> manager
       if (t.status === "For Approval" && managerEmail && !n.approval) {
-        if (await emailTask(managerEmail, "", "Task Ready For Approval", t)) { n.approval = true; didChange = true; }
+        n.approval = true; didChange = true;
+        await emailTask(managerEmail, "", "Task Ready For Approval", t);
       }
 
-      // Due reminders -> owner + cc manager (skip done / archived / approval-pending)
-      if (!isDoneStatus(t.status) && !t.archived && t.status !== "For Approval") {
+      // Due reminders -> owner + cc manager
+      if (t.status !== "For Approval") {
         const due = dueInstant(t);
         if (due != null) {
           const ms = due - now;
           if (ms <= 0) {
-            if (!n.overdue && ownerEmail && (await emailTask(ownerEmail, managerEmail, "Task Overdue", t))) { n.overdue = true; didChange = true; }
+            if (!n.overdue && ownerEmail) { n.overdue = true; didChange = true; await emailTask(ownerEmail, managerEmail, "Task Overdue", t); }
           } else if (ms <= leadMs) {
-            if (!n.almost && ownerEmail && (await emailTask(ownerEmail, managerEmail, "Task Due Soon", t))) { n.almost = true; didChange = true; }
+            if (!n.almost && ownerEmail) { n.almost = true; didChange = true; await emailTask(ownerEmail, managerEmail, "Task Due Soon", t); }
           }
         }
       }
