@@ -411,7 +411,7 @@ function mapStatus(s){
 }
 function mapCadence(c){ if(!c || c==="None") return "One Off"; return c; }
 function isDone(t){ return t.status===DONE_STATUS; }
-function isRecurring(t){ return ["Daily","Weekly","Bi-Weekly","Monthly"].includes(t.cadence); }
+function isRecurring(t){ return ["Daily","Weekly","Bi-Weekly","Monthly","Quarterly"].includes(t.cadence); }
 /* A task is "completed/archived" once finished — kept in Supabase for history but
    hidden from the active board. Old completed tasks (no archived flag) still count
    as completed via their status. "Active" = everything not completed/archived. */
@@ -426,7 +426,7 @@ const MANAGERS = ["Sammy","Lisa","Dyana","Leo","Dawn","Rob"];
    NOTE: this is a UI guardrail, not security — there is no login. */
 const ADMINS = ["sammy","rob","robert"];
 const PRIORITIES = ["Critical","High","Normal","Low"];
-const CADENCES = ["One Off","Daily","Weekly","Bi-Weekly","Monthly"];
+const CADENCES = ["One Off","Daily","Weekly","Bi-Weekly","Monthly","Quarterly"];
 const REMINDER_OPTIONS = [
   {v:15,l:"15 minutes before due"},{v:30,l:"30 minutes before due"},
   {v:60,l:"1 hour before due"},{v:120,l:"2 hours before due"},{v:1440,l:"1 day before due"}
@@ -773,6 +773,7 @@ function nextOccurrence(t){
     else if(unit==="Weekly") d.setDate(d.getDate()+7);
     else if(unit==="Bi-Weekly") d.setDate(d.getDate()+14);
     else if(unit==="Monthly") d.setMonth(d.getMonth()+1);
+    else if(unit==="Quarterly") d.setMonth(d.getMonth()+3);
     return d.toISOString().slice(0,10);
   };
   clone.startDate = shift(t.startDate, t.cadence);
@@ -1289,11 +1290,11 @@ function viewDepartments(){
 function viewRecurring(){
   const rec = state.tasks.filter(t=>isRecurring(t) && isActive(t))
     .sort((a,b)=>(dueDateTime(a)||9e15)-(dueDateTime(b)||9e15));
-  const groups = {Daily:[],Weekly:[],"Bi-Weekly":[],Monthly:[]};
+  const groups = {Daily:[],Weekly:[],"Bi-Weekly":[],Monthly:[],Quarterly:[]};
   rec.forEach(t=>{ (groups[t.cadence]||(groups[t.cadence]=[])).push(t); });
   return `<div class="page-head"><div><h1>Recurring Tasks</h1>
     <div class="sub">When completed, the next occurrence is created automatically at the same start &amp; due time. "One Off" tasks do not repeat.</div></div></div>
-    ${["Daily","Weekly","Bi-Weekly","Monthly"].map(g=>`
+    ${["Daily","Weekly","Bi-Weekly","Monthly","Quarterly"].map(g=>`
       <div class="card sect" style="margin-bottom:14px">
         <h2>↻ ${g} <span class="cnt">${groups[g].length}</span></h2>
         ${groups[g].length?boardTable(groups[g]):'<div class="empty">No '+g.toLowerCase()+' recurring tasks.</div>'}
