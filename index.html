@@ -608,6 +608,21 @@ async function persistTask(t){
     localStorage.setItem(LS.demo, JSON.stringify(state.tasks));
   }
 }
+/* Save many tasks in ONE request (used by bulk import so a large set doesn't
+   make dozens of round-trips or fail partway silently). */
+async function persistTasks(arr){
+  if(!arr || !arr.length) return true;
+  const now=new Date().toISOString();
+  arr.forEach(t=>{ stampContacts(t); t.updatedAt=now; });
+  if(state.mode==="live" && state.sb){
+    const payload=arr.map(t=>({id:t.id, data:t, updated_at:t.updatedAt}));
+    const {error}=await state.sb.from("tasks").upsert(payload, {onConflict:"id"});
+    if(error){ console.warn("bulk save failed",error); toast("Some tasks failed to save — check connection"); return false; }
+  }else{
+    localStorage.setItem(LS.demo, JSON.stringify(state.tasks));
+  }
+  return true;
+}
 async function deleteTaskRemote(id){
   if(state.mode==="live" && state.sb){
     const {error} = await state.sb.from("tasks").delete().eq("id", id);
@@ -1946,6 +1961,18 @@ function normTime(s){
   if(m){ let h=+m[1]; const ap=m[2].toLowerCase(); if(ap==="pm"&&h<12)h+=12; if(ap==="am"&&h===12)h=0; return String(h).padStart(2,"0")+":00"; }
   return s;
 }
+/* Normalize slightly-different cadence text from a spreadsheet to a valid option. */
+function normCadence(s){
+  const v=String(s||"").trim().toLowerCase().replace(/[\s_-]+/g,"");
+  if(!v) return "One Off";
+  const map={oneoff:"One Off",once:"One Off",none:"One Off",adhoc:"One Off",
+    daily:"Daily",day:"Daily",everyday:"Daily",
+    weekly:"Weekly",week:"Weekly",
+    biweekly:"Bi-Weekly",fortnightly:"Bi-Weekly",everytwoweeks:"Bi-Weekly",
+    monthly:"Monthly",month:"Monthly",
+    quarterly:"Quarterly",quarter:"Quarterly",every3months:"Quarterly"};
+  return map[v] || matchOne(s, CADENCES, "One Off");
+}
 /* Resolve the nth (1..5, or -1=last) weekday of a given month to a Date. */
 function nthWeekdayOfMonth(year, month, weekday, ord){
   if(ord===-1){
@@ -2027,7 +2054,7 @@ function rowsToTasks(rows){
     t.department=matchOne(o.department, DEPARTMENTS, "Operations");
     t.priority=matchOne(o.priority, PRIORITIES, "Normal");
     t.status=matchOne(o.status, STATUSES, "") || mapStatus(o.status);
-    t.cadence=matchOne(o.cadence, CADENCES, "One Off");
+    t.cadence=normCadence(o.cadence);
     t.requiresApproval=/^(yes|y|true|1)$/i.test(o.requiresApproval||"");
     // Smart Start/Due dates: understand schedule phrases as well as literal dates.
     const sr=parseScheduleRule(o.startDate), dr=parseScheduleRule(o.dueDate);
@@ -2067,17 +2094,24 @@ function doParseImport(text){
 }
 async function doImport(tasks, sendEmails){
   if(!requireAdmin()) return;
-  let n=0;
-  for(const t of tasks){
-    if(!sendEmails) ensureNotif(t).assigned=true;   // suppress assignment email unless asked
+  if(!tasks || !tasks.length) return;
+  if(state.modal && state.modal._importing) return;   // guard against double-submit duplicates
+  if(state.modal) state.modal._importing = true;
+  const go=$("#importGo"); if(go){ go.disabled=true; go.textContent="Importing…"; }
+
+  const list = tasks.slice();
+  for(const t of list){
+    if(!sendEmails) ensureNotif(t).assigned=true;      // suppress assignment email unless asked
     addActivity(t, "Imported from spreadsheet");
     state.tasks.push(t);
-    await persistTask(t);
-    if(sendEmails && t.owner){ await notifyAssigned(t, "created"); await persistTask(t); }
-    n++;
+  }
+  const ok = await persistTasks(list);                 // single bulk upsert (fast, atomic-ish)
+  if(sendEmails){                                       // optional: notify owners (throttled)
+    for(const t of list){ if(t.owner) await notifyAssigned(t, "created"); }
+    await persistTasks(list.filter(t=>t.owner));        // save the updated notif flags
   }
   closeModal();
-  toast("Imported "+n+" task"+(n!==1?"s":""));
+  toast(`Imported ${list.length} task${list.length!==1?'s':''}`+(ok===false?" (save error — check connection)":""));
   render();
 }
 function renderImportModal(){
