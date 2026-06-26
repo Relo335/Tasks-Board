@@ -363,6 +363,28 @@
     .tbl-board .rowact{justify-content:flex-end;flex-wrap:wrap}
     .tbl-board .due{align-items:flex-end}
   }
+  /* ---- Marketing Performance ---- */
+  .mkt-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
+  .mkt-card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;position:relative;overflow:hidden}
+  .mkt-card .top{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+  .mkt-card .ic{width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:17px;flex:0 0 auto}
+  .mkt-card .pn{font-weight:700;font-size:14px;line-height:1.1}
+  .mkt-card .bn{font-size:11px;color:var(--muted2)}
+  .mkt-card .acc{font-size:11px;color:var(--muted)}
+  .mkt-metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px 14px}
+  .mkt-metric{display:flex;flex-direction:column;gap:2px}
+  .mkt-metric .ml{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted2);font-weight:700}
+  .mkt-metric .mv{font-size:16px;font-weight:800}
+  .mkt-metric .mv .up{font-size:11px;color:var(--d-finance);font-weight:700}
+  .mkt-metric .mv .down{font-size:11px;color:var(--red);font-weight:700}
+  .mkt-tag{display:inline-block;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px;text-transform:uppercase;letter-spacing:.03em}
+  .mkt-tag.live{background:rgba(62,201,138,.16);color:#3ec98a}
+  .mkt-tag.manual{background:rgba(245,197,66,.16);color:#f5c542}
+  .mkt-tag.off{background:rgba(139,149,165,.16);color:#8b95a5}
+  .mkt-conn{display:flex;flex-wrap:wrap;gap:8px}
+  .mkt-conn .row{display:flex;align-items:center;gap:8px;border:1px solid var(--border);border-radius:10px;padding:8px 10px;font-size:12px;min-width:200px;flex:1}
+  .mkt-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:14px}
+  .mkt-period{display:flex;gap:4px;flex-wrap:wrap}
 </style>
 </head>
 <body>
@@ -438,6 +460,33 @@ const REMINDER_OPTIONS = [
   {v:60,l:"1 hour before due"},{v:120,l:"2 hours before due"},{v:1440,l:"1 day before due"}
 ];
 
+/* ---- Marketing Performance ------------------------------------------------- */
+/* Brands/accounts tracked, and the social platforms each can post on. Live data
+   is fetched server-side (/api/marketing/*) using env-var credentials; if a
+   platform isn't connected the dashboard still loads and shows "Not connected".
+   History is stored in Supabase (marketing_metrics / marketing_posts) so growth
+   can be measured over time. Manual entries (source = "Manual") are supported as
+   a fallback for platforms without API access. */
+const MKT_BRANDS = ["Relocators","Nobody Move","Sisters in Charge","Rob's Personal"];
+const MKT_PLATFORMS = ["Instagram","Facebook","TikTok","YouTube","LinkedIn"];
+const MKT_PLATFORM_ICON = {Instagram:"📸",Facebook:"📘",TikTok:"🎵",YouTube:"▶️",LinkedIn:"💼"};
+const MKT_PLATFORM_COLOR = {Instagram:"#e1306c",Facebook:"#1877f2",TikTok:"#00f2ea",YouTube:"#ff0000",LinkedIn:"#0a66c2"};
+/* Metric fields shown on each account card (key on the metrics object → label). */
+const MKT_METRICS = [
+  {k:"followers",l:"Followers"},{k:"profileVisits",l:"Profile Visits"},
+  {k:"reach",l:"Reach"},{k:"impressions",l:"Impressions"},
+  {k:"engagement",l:"Engagement"},{k:"likes",l:"Likes"},
+  {k:"comments",l:"Comments"},{k:"shares",l:"Shares"},
+  {k:"saves",l:"Saves"},{k:"videoViews",l:"Video Views"},
+  {k:"posts",l:"Posts"},{k:"watchTime",l:"Watch Time (hrs)"}
+];
+/* History comparison periods (key → label + days back the window starts). */
+const MKT_PERIODS = [
+  {k:"today",l:"Today",days:1},{k:"7d",l:"This Week",days:7},
+  {k:"30d",l:"Last 30 Days",days:30},{k:"month",l:"This Month",days:31},
+  {k:"all",l:"All Time",days:3650}
+];
+
 /* Templates pre-fill department, cadence, priority, and a checklist */
 const TEMPLATES = [
   {name:"Payroll", department:"Finance", cadence:"Weekly", priority:"High",
@@ -494,6 +543,7 @@ const state = {
   calRef: new Date(),
   calView: "month",         // "today" | "week" | "month"
   navOpen: false,           // mobile sidebar open
+  mkt: { metrics:[], posts:[], accounts:[], status:null, period:"30d", brand:"", platform:"", loading:false, loaded:false },
   sb: null                 // supabase client
 };
 
@@ -1023,6 +1073,7 @@ function renderShell(){
         ${navItem("departments","◩","Departments")}
         ${navItem("recurring","↻","Recurring Tasks")}
         ${navItem("reports","◷","Reports")}
+        ${navItem("marketing","📈","Marketing Performance")}
         ${navItem("settings","⚙","Settings")}
       </nav>
       <div class="side-foot">
@@ -1079,6 +1130,7 @@ function renderContent(){
     case "departments": c.innerHTML = viewDepartments(); bindBoard(c); break;
     case "recurring": c.innerHTML = viewRecurring(); bindBoard(c); break;
     case "reports": c.innerHTML = viewReports(); break;
+    case "marketing": c.innerHTML = viewMarketing(); bindMarketing(c); break;
     case "settings": c.innerHTML = viewSettings(); bindSettings(c); break;
   }
 }
@@ -1411,6 +1463,407 @@ function viewReports(){
       <tbody>${completedRows}</tbody></table></div>${completed.length>200?'<div class="sub" style="margin-top:8px">Showing the 200 most recent.</div>':''}`
       :'<div class="empty">No completed tasks yet.</div>'}
   </div>`;
+}
+
+/* ===========================================================================
+   MARKETING PERFORMANCE
+   Tracks brands/accounts across Instagram, Facebook, TikTok, YouTube, LinkedIn.
+   Live data is fetched server-side (/api/marketing/refresh) using env-var
+   credentials and stored as snapshots in Supabase (marketing_metrics /
+   marketing_posts) so growth can be measured over time. Missing credentials
+   never crash anything — the section loads and shows "Not connected". Manual
+   entry (source = "Manual") and CSV upload are provided as a fallback.
+   This module is fully isolated and does not touch the task board.
+   =========================================================================== */
+const MKT_LS = { metrics:"occ_mkt_metrics", posts:"occ_mkt_posts" };
+function mktN(v){ return (v==null||isNaN(+v))?0:+v; }
+function mktFmt(v){
+  v=+v||0; const a=Math.abs(v);
+  if(a>=1e6) return (v/1e6).toFixed(a>=1e7?0:1).replace(/\.0$/,'')+"M";
+  if(a>=1e3) return (v/1e3).toFixed(a>=1e4?0:1).replace(/\.0$/,'')+"K";
+  return String(Math.round(v));
+}
+
+/* ---- Data layer (Supabase live / localStorage demo) ---- */
+async function loadMarketing(){
+  state.mkt.loading=true;
+  try{
+    if(state.mode==="live" && state.sb){
+      const [mr,pr]=await Promise.all([
+        state.sb.from("marketing_metrics").select("*").order("collected_at",{ascending:true}),
+        state.sb.from("marketing_posts").select("*").order("collected_at",{ascending:false})
+      ]);
+      if(mr.error) throw mr.error;
+      state.mkt.metrics=mr.data||[];
+      state.mkt.posts=(pr&&!pr.error&&pr.data)?pr.data:[];
+      state.mkt.tableMissing=false;
+    }else{
+      state.mkt.metrics=JSON.parse(localStorage.getItem(MKT_LS.metrics)||"[]");
+      state.mkt.posts=JSON.parse(localStorage.getItem(MKT_LS.posts)||"[]");
+    }
+  }catch(e){
+    console.warn("marketing load failed:", e.message||e);
+    state.mkt.metrics=state.mkt.metrics||[]; state.mkt.posts=state.mkt.posts||[];
+    state.mkt.tableMissing=/relation|does not exist|schema cache|could not find the table|not exist/i.test(String(e.message||e));
+  }
+  state.mkt.loading=false; state.mkt.loaded=true;
+}
+async function mktSaveMetrics(rows){
+  if(!rows||!rows.length) return;
+  if(state.mode==="live" && state.sb){
+    const {error}=await state.sb.from("marketing_metrics").insert(rows);
+    if(error){ console.warn(error); toast("Could not save metrics — run the marketing SQL in Supabase"); throw error; }
+  }else{
+    const all=JSON.parse(localStorage.getItem(MKT_LS.metrics)||"[]"); all.push(...rows);
+    localStorage.setItem(MKT_LS.metrics, JSON.stringify(all));
+  }
+}
+async function mktSavePosts(rows){
+  if(!rows||!rows.length) return;
+  if(state.mode==="live" && state.sb){
+    const {error}=await state.sb.from("marketing_posts").upsert(rows,{onConflict:"id"});
+    if(error) console.warn(error);
+  }else{
+    const map={}; JSON.parse(localStorage.getItem(MKT_LS.posts)||"[]").forEach(p=>map[p.id]=p);
+    rows.forEach(p=>map[p.id]=p);
+    localStorage.setItem(MKT_LS.posts, JSON.stringify(Object.values(map)));
+  }
+}
+
+/* Pull live numbers from the serverless API, store a timestamped snapshot, reload. */
+async function refreshMarketing(){
+  if(!requireAdmin()) return;
+  state.mkt.loading=true; renderContent();
+  let res;
+  try{
+    const r=await fetch("/api/marketing/refresh");
+    res=await r.json();
+  }catch(e){
+    toast("Refresh failed — is the app deployed on Vercel? "+(e.message||e));
+    state.mkt.loading=false; renderContent(); return;
+  }
+  state.mkt.status=res;
+  const now=(res&&res.generatedAt)||new Date().toISOString();
+  const metricRows=[], postRows=[];
+  ((res&&res.accounts)||[]).filter(a=>a.connected).forEach(a=>{
+    const brand=a.brand||"—", platform=a.platform||"—", account=a.accountName||a.brand||platform;
+    Object.entries(a.metrics||{}).forEach(([k,v])=>{
+      if(v==null||isNaN(+v)) return;
+      metricRows.push({id:uid(), brand, platform, account_name:account, metric_type:k, metric_value:+v, collected_at:now, source:a.source||"API", notes:a.note||""});
+    });
+    (a.posts||[]).forEach(p=>{
+      const link=p.link||""; const id=("p_"+platform+":"+(link||p.title||uid())).slice(0,190);
+      postRows.push({id, brand, platform, account_name:account, post_title:(p.title||"").slice(0,300), post_date:p.date||null,
+        views:mktN(p.views), likes:mktN(p.likes), comments:mktN(p.comments), shares:mktN(p.shares), saves:mktN(p.saves),
+        engagement_rate:mktN(p.engagementRate), link, source:a.source||"API", collected_at:now});
+    });
+  });
+  try{
+    if(metricRows.length) await mktSaveMetrics(metricRows);
+    if(postRows.length) await mktSavePosts(postRows);
+  }catch(e){}
+  await loadMarketing();
+  const n=((res&&res.accounts)||[]).filter(a=>a.connected).length;
+  toast(n?`Refreshed ${n} connected account(s)`:"No accounts connected — add API keys in Vercel, then refresh");
+  state.mkt.loading=false; renderContent();
+}
+
+/* ---- Metric accessors over the snapshot history ---- */
+function mktRows(brand,platform,metric){
+  return state.mkt.metrics
+    .filter(r=>r.brand===brand && r.platform===platform && r.metric_type===metric)
+    .sort((a,b)=>new Date(a.collected_at)-new Date(b.collected_at));
+}
+function mktLatest(brand,platform,metric){ const r=mktRows(brand,platform,metric); return r.length?r[r.length-1]:null; }
+function mktBaseline(brand,platform,metric,since){
+  const rows=mktRows(brand,platform,metric); if(!rows.length) return null;
+  let base=null; for(const r of rows){ if(new Date(r.collected_at)<=since) base=r; else break; }
+  return base || rows[0];
+}
+/* {cur, delta, base} growth of a metric since the window start (null if no data). */
+function mktDelta(brand,platform,metric,since){
+  const cur=mktLatest(brand,platform,metric); if(!cur) return null;
+  const base=mktBaseline(brand,platform,metric,since);
+  const cv=+cur.metric_value, bv=base?+base.metric_value:cv;
+  return {cur:cv, base:bv, delta:(base&&base!==cur)?cv-bv:0};
+}
+function mktSnapshot(brand,platform){
+  const metrics={}; let collectedAt=null, source=null, account=null;
+  MKT_METRICS.forEach(m=>{ const r=mktLatest(brand,platform,m.k);
+    if(r){ metrics[m.k]=+r.metric_value;
+      if(!collectedAt||new Date(r.collected_at)>new Date(collectedAt)){ collectedAt=r.collected_at; source=r.source; account=r.account_name; } } });
+  return {metrics, collectedAt, source, account, has:Object.keys(metrics).length>0};
+}
+/* All brand|platform combos that have data or a connection status. */
+function mktCombos(){
+  const set=new Set();
+  state.mkt.metrics.forEach(r=>set.add(r.brand+"|"+r.platform));
+  ((state.mkt.status&&state.mkt.status.accounts)||[]).forEach(a=>{ if(a.brand&&a.platform) set.add(a.brand+"|"+a.platform); });
+  return [...set].map(k=>{ const [brand,platform]=k.split("|"); return {brand,platform}; })
+    .sort((a,b)=> a.brand===b.brand ? MKT_PLATFORMS.indexOf(a.platform)-MKT_PLATFORMS.indexOf(b.platform) : a.brand.localeCompare(b.brand));
+}
+
+/* ---- View ---- */
+function viewMarketing(){
+  const m=state.mkt;
+  if(!m.loaded){
+    // Lazily load on first open; bindMarketing kicks off the fetch then re-renders.
+    return `<div class="page-head"><div><h1>Marketing Performance</h1><div class="sub">Loading metrics…</div></div></div>
+      <div class="card sect"><div class="empty">Loading marketing data…</div></div>`;
+  }
+  const period=MKT_PERIODS.find(p=>p.k===m.period)||MKT_PERIODS[2];
+  const since=new Date(Date.now()-period.days*86400000);
+  const fBrand=m.brand, fPlatform=m.platform;
+  let combos=mktCombos();
+  if(fBrand) combos=combos.filter(c=>c.brand===fBrand);
+  if(fPlatform) combos=combos.filter(c=>c.platform===fPlatform);
+
+  // Aggregate KPIs across the (filtered) accounts.
+  let totFollowers=0, totReach=0, totEngagement=0, netGrowth=0, erSum=0, erCount=0;
+  combos.forEach(({brand,platform})=>{
+    const snap=mktSnapshot(brand,platform);
+    totFollowers+=mktN(snap.metrics.followers);
+    totReach+=mktN(snap.metrics.reach);
+    totEngagement+=mktN(snap.metrics.engagement)||mktN(snap.metrics.likes)+mktN(snap.metrics.comments)+mktN(snap.metrics.shares);
+    const d=mktDelta(brand,platform,"followers",since); if(d) netGrowth+=d.delta;
+    if(snap.metrics.engagementRate!=null){ erSum+=snap.metrics.engagementRate; erCount++; }
+  });
+  const avgER=erCount?(erSum/erCount):0;
+  const growthArrow = netGrowth>0?`<span style="color:var(--d-finance)">▲ ${mktFmt(netGrowth)}</span>`
+    : netGrowth<0?`<span style="color:var(--red)">▼ ${mktFmt(Math.abs(netGrowth))}</span>` : "—";
+
+  const kpi=(val,label,acc,sub)=>`<div class="kpi"><div class="acc" style="background:${acc}"></div>
+    <div class="v">${val}</div><div class="l">${label}</div>${sub?`<div class="sub" style="margin-top:2px;font-size:11px">${sub}</div>`:''}</div>`;
+
+  const periodBtns=MKT_PERIODS.map(p=>`<span class="chip ${m.period===p.k?'active':''}" data-mktperiod="${p.k}">${p.l}</span>`).join("");
+  const brandSel=`<select class="f" data-mktbrand=""><option value="">All Brands</option>${
+    MKT_BRANDS.concat(combos.map(c=>c.brand).filter(b=>!MKT_BRANDS.includes(b)))
+      .filter((b,i,a)=>a.indexOf(b)===i).map(b=>`<option ${fBrand===b?'selected':''}>${esc(b)}</option>`).join("")}</select>`;
+  const platSel=`<select class="f" data-mktplatform=""><option value="">All Platforms</option>${
+    MKT_PLATFORMS.map(p=>`<option ${fPlatform===p?'selected':''}>${esc(p)}</option>`).join("")}</select>`;
+
+  // Account cards
+  const cards = combos.map(({brand,platform})=>mktCard(brand,platform,since)).join("");
+
+  // Connection status (from last refresh)
+  const statusRows = ((m.status&&m.status.accounts)||[]).map(a=>{
+    const ok=a.connected; const color=MKT_PLATFORM_COLOR[a.platform]||"var(--muted)";
+    return `<div class="row"><span style="width:9px;height:9px;border-radius:50%;background:${ok?'var(--d-finance)':'var(--muted2)'};flex:0 0 auto"></span>
+      <span style="font-size:14px">${MKT_PLATFORM_ICON[a.platform]||"•"}</span>
+      <div style="flex:1;min-width:0"><div style="font-weight:600">${esc(a.brand||a.platform)} · ${esc(a.platform||'')}</div>
+      <div class="sub" style="font-size:11px;color:var(--muted2)">${ok?esc("Connected · "+(a.source||"API")):esc(a.note||"Not connected")}</div></div>
+      <span class="mkt-tag ${ok?'live':'off'}">${ok?'Live':'Off'}</span></div>`;
+  }).join("");
+
+  // Top content
+  let posts=(m.posts||[]).slice();
+  if(fBrand) posts=posts.filter(p=>p.brand===fBrand);
+  if(fPlatform) posts=posts.filter(p=>p.platform===fPlatform);
+  posts.sort((a,b)=>(mktN(b.views)+mktN(b.likes)*5)-(mktN(a.views)+mktN(a.likes)*5));
+  const topRows=posts.slice(0,15).map(p=>`<tr>
+    <td>${MKT_PLATFORM_ICON[p.platform]||''} ${esc(p.platform||'')}</td>
+    <td>${esc(p.brand||'—')}</td>
+    <td style="max-width:280px">${esc((p.post_title||'').slice(0,90))||'—'}</td>
+    <td>${p.post_date?esc(new Date(p.post_date).toLocaleDateString()):'—'}</td>
+    <td>${mktFmt(p.views)}</td><td>${mktFmt(p.likes)}</td><td>${mktFmt(p.comments)}</td>
+    <td>${mktFmt(p.shares)}</td><td>${mktFmt(p.saves)}</td>
+    <td>${p.engagement_rate?(+p.engagement_rate).toFixed(1)+'%':'—'}</td>
+    <td>${p.link?`<a href="${esc(p.link)}" target="_blank" rel="noreferrer">open</a>`:'—'}</td>
+  </tr>`).join("");
+
+  const lastRefresh = m.status&&m.status.generatedAt ? new Date(m.status.generatedAt).toLocaleString()
+    : (combos.length ? "from saved history" : "never");
+
+  return `<div class="page-head">
+      <div><h1>Marketing Performance</h1>
+      <div class="sub">Followers, reach, engagement & growth across brands and platforms · Last refresh: ${esc(lastRefresh)}</div></div>
+    </div>
+    ${m.tableMissing?`<div class="banner demo" style="margin-bottom:14px">⚠ Marketing tables not found in Supabase. Run the <b>marketing SQL</b> (at the bottom of this file) to enable saved history. Manual entry still works locally.</div>`:''}
+    <div class="mkt-toolbar">
+      <div class="mkt-period">${periodBtns}</div>
+      ${brandSel}${platSel}
+      <div class="spacer" style="flex:1"></div>
+      ${isAdmin()?`<button class="btn primary" id="mktRefresh" ${m.loading?'disabled':''}>${m.loading?'⟳ Refreshing…':'⟳ Refresh Metrics'}</button>
+      <button class="btn sm" id="mktManual">＋ Manual Entry</button>
+      <button class="btn sm" id="mktCsv">⬆ CSV Upload</button>`:''}
+    </div>
+    <div class="kpis" style="grid-template-columns:repeat(5,1fr)">
+      ${kpi(mktFmt(totFollowers),"Total Followers","var(--d-marketing)")}
+      ${kpi(growthArrow,"Follower Growth ("+period.l+")","var(--d-finance)")}
+      ${kpi(mktFmt(totReach),"Total Reach","var(--d-sales)")}
+      ${kpi(mktFmt(totEngagement),"Total Engagement","var(--accent)")}
+      ${kpi((avgER?avgER.toFixed(1):'0')+"%","Avg Engagement Rate","var(--d-operations)")}
+    </div>
+    <div class="card sect" style="margin-bottom:16px">
+      <h2>Accounts <span class="cnt">${combos.length}</span></h2>
+      ${combos.length?`<div class="mkt-grid">${cards}</div>`
+        :`<div class="empty">No account data yet. ${isAdmin()?'Click <b>Refresh Metrics</b> to pull live data (after adding API keys in Vercel), or <b>Manual Entry</b> to add numbers by hand.':'An admin can connect accounts to populate this dashboard.'}</div>`}
+    </div>
+    <div class="grid2">
+      <div class="card sect">
+        <h2>🔌 Connection Status</h2>
+        <div class="sub" style="margin:-4px 0 12px;color:var(--muted2)">API credentials are stored as Vercel environment variables — never in this page. Click Refresh to test the connection.</div>
+        ${statusRows?`<div class="mkt-conn">${statusRows}</div>`
+          :`<div class="hint">No connection test run yet. ${isAdmin()?'Click <b>Refresh Metrics</b> to check which platforms are connected.':''}<br><br>
+            Add these in Vercel → Project → Settings → Environment Variables:
+            <div style="margin-top:6px;line-height:1.7">
+            <code class="k">META_ACCESS_TOKEN</code> <code class="k">META_PAGE_ID</code> <code class="k">INSTAGRAM_BUSINESS_ACCOUNT_ID</code><br>
+            <code class="k">YOUTUBE_API_KEY</code> <code class="k">YOUTUBE_CHANNEL_ID</code><br>
+            <code class="k">TIKTOK_ACCESS_TOKEN</code> · <code class="k">LINKEDIN_ACCESS_TOKEN</code> <code class="k">LINKEDIN_ORG_ID</code></div></div>`}
+      </div>
+      <div class="card sect">
+        <h2>📈 Growth by Account <span class="cnt">${combos.length}</span></h2>
+        ${combos.length?combos.map(({brand,platform})=>{
+          const d=mktDelta(brand,platform,"followers",since); const cur=d?d.cur:0; const dl=d?d.delta:0;
+          const pct=d&&d.base?((d.delta/d.base)*100):0;
+          return `<div class="bar-row"><div class="bl" title="${esc(brand+' · '+platform)}">${MKT_PLATFORM_ICON[platform]||''} ${esc(brand)}</div>
+            <div class="bar-track"><div class="bar-fill" style="width:${Math.min(100,Math.max(6,Math.abs(pct)*4||6))}%;background:${MKT_PLATFORM_COLOR[platform]||'var(--accent)'}">${mktFmt(cur)}</div></div>
+            <div style="width:74px;text-align:right;font-size:12px;color:${dl>0?'var(--d-finance)':dl<0?'var(--red)':'var(--muted2)'}">${dl>0?'▲':dl<0?'▼':''}${mktFmt(Math.abs(dl))} ${d&&d.base?`(${pct>0?'+':''}${pct.toFixed(1)}%)`:''}</div></div>`;
+        }).join(""):'<div class="empty">No follower history yet.</div>'}
+      </div>
+    </div>
+    <div class="card sect" style="margin-top:16px">
+      <h2>🏆 Top Content <span class="cnt">${posts.length}</span></h2>
+      <div class="sub" style="margin:-4px 0 12px;color:var(--muted2)">Best-performing posts across the selected brands/platforms, ranked by reach & engagement.</div>
+      ${topRows?`<div style="overflow-x:auto"><table>
+        <thead><tr><th>Platform</th><th>Brand</th><th>Caption</th><th>Date</th><th>Views</th><th>Likes</th><th>Comments</th><th>Shares</th><th>Saves</th><th>Eng. Rate</th><th>Link</th></tr></thead>
+        <tbody>${topRows}</tbody></table></div>`
+        :'<div class="empty">No post data yet. Refresh metrics or add posts via Manual Entry.</div>'}
+    </div>`;
+}
+
+/* A single brand × platform account card with current values + period deltas. */
+function mktCard(brand,platform,since){
+  const snap=mktSnapshot(brand,platform);
+  const color=MKT_PLATFORM_COLOR[platform]||"var(--accent)";
+  const conn=((state.mkt.status&&state.mkt.status.accounts)||[]).find(a=>a.brand===brand&&a.platform===platform);
+  const isManual=snap.source==="Manual";
+  const tag = isManual?'<span class="mkt-tag manual">Manual</span>'
+    : (conn&&conn.connected)||(snap.source&&snap.source!=="Manual") ? '<span class="mkt-tag live">Live</span>'
+    : '<span class="mkt-tag off">Not connected</span>';
+  const metricCells = MKT_METRICS.filter(mm=>snap.metrics[mm.k]!=null).map(mm=>{
+    const d=mktDelta(brand,platform,mm.k,since); const dl=d?d.delta:0;
+    return `<div class="mkt-metric"><span class="ml">${mm.l}</span>
+      <span class="mv">${mktFmt(snap.metrics[mm.k])}${dl?` <span class="${dl>0?'up':'down'}">${dl>0?'▲':'▼'}${mktFmt(Math.abs(dl))}</span>`:''}</span></div>`;
+  }).join("");
+  const er = snap.metrics.engagementRate!=null?`<div class="acc" style="margin-top:8px;color:var(--muted)">Engagement rate: <b>${(+snap.metrics.engagementRate).toFixed(1)}%</b></div>`:'';
+  return `<div class="mkt-card">
+    <div class="top">
+      <div class="ic" style="background:${color}1f;color:${color}">${MKT_PLATFORM_ICON[platform]||'•'}</div>
+      <div style="flex:1;min-width:0"><div class="pn">${esc(brand)}</div><div class="bn">${esc(platform)}${snap.account?` · @${esc(snap.account)}`:''}</div></div>
+      ${tag}
+    </div>
+    ${metricCells?`<div class="mkt-metrics">${metricCells}</div>`:`<div class="empty" style="padding:10px 0">${conn&&!conn.connected?esc(conn.note||'Not connected'):'No data yet'}</div>`}
+    ${er}
+    ${snap.collectedAt?`<div class="acc" style="margin-top:8px;font-size:10px">Updated ${esc(new Date(snap.collectedAt).toLocaleString())}</div>`:''}
+  </div>`;
+}
+
+function bindMarketing(c){
+  // Lazy load on first open, then re-render with data.
+  if(!state.mkt.loaded && !state.mkt.loading){
+    loadMarketing().then(()=>{ if(state.view==="marketing") renderContent(); });
+    return;
+  }
+  c.querySelectorAll("[data-mktperiod]").forEach(el=>el.onclick=()=>{ state.mkt.period=el.dataset.mktperiod; renderContent(); });
+  const bs=c.querySelector("[data-mktbrand]"); if(bs) bs.onchange=()=>{ state.mkt.brand=bs.value; renderContent(); };
+  const ps=c.querySelector("[data-mktplatform]"); if(ps) ps.onchange=()=>{ state.mkt.platform=ps.value; renderContent(); };
+  const rb=$("#mktRefresh"); if(rb) rb.onclick=refreshMarketing;
+  const mb=$("#mktManual"); if(mb) mb.onclick=()=>openMktManualModal();
+  const cb=$("#mktCsv"); if(cb) cb.onclick=()=>openMktCsvModal();
+}
+
+/* ---- Manual entry modal ---- */
+function openMktManualModal(){
+  if(!requireAdmin()) return;
+  state.modal={type:"mktManual", brand:state.mkt.brand||MKT_BRANDS[0], platform:state.mkt.platform||MKT_PLATFORMS[0]};
+  renderModal();
+}
+function renderMktManualModal(){
+  const md=state.modal, root=$("#modal-root");
+  const fields=MKT_METRICS.concat([{k:"engagementRate",l:"Engagement Rate (%)"},{k:"growthRate",l:"Growth Rate (%)"}]);
+  root.innerHTML=`
+  <div class="modal show"><div class="box" style="max-width:560px">
+    <div class="mh"><h3>Manual Metric Entry</h3><button class="x" id="modalClose">✕</button></div>
+    <div class="mb">
+      <div class="sub" style="margin-bottom:12px">Add a snapshot by hand for platforms without API access. It is saved with source <b>“Manual”</b> and timestamped now, so it still contributes to growth history.</div>
+      <div class="form-grid">
+        <div class="fld"><label>Brand / Account</label><input id="mk_brand" value="${esc(md.brand)}" list="mk_brands"/>
+          <datalist id="mk_brands">${MKT_BRANDS.map(b=>`<option>${esc(b)}</option>`).join("")}</datalist></div>
+        <div class="fld"><label>Platform</label><select id="mk_platform">${MKT_PLATFORMS.map(p=>`<option ${md.platform===p?'selected':''}>${p}</option>`).join("")}</select></div>
+        <div class="fld full"><label>Account handle (optional)</label><input id="mk_account" placeholder="@username"/></div>
+        ${fields.map(f=>`<div class="fld"><label>${esc(f.l)}</label><input type="number" step="any" data-mkfield="${f.k}" placeholder="—"/></div>`).join("")}
+        <div class="fld full"><label>Notes (optional)</label><input id="mk_notes" placeholder="e.g. pulled from native insights"/></div>
+      </div>
+    </div>
+    <div class="mf"><button class="btn" id="modalCancel">Cancel</button><button class="btn primary" id="mk_save">Save Snapshot</button></div>
+  </div></div>`;
+  $("#modalClose").onclick=closeModal; $("#modalCancel").onclick=closeModal;
+  $("#mk_save").onclick=async()=>{
+    const brand=$("#mk_brand").value.trim()||"—", platform=$("#mk_platform").value, account=$("#mk_account").value.trim()||brand;
+    const notes=$("#mk_notes").value.trim();
+    const now=new Date().toISOString(); const rows=[];
+    root.querySelectorAll("[data-mkfield]").forEach(el=>{
+      const v=el.value.trim(); if(v==="" || isNaN(+v)) return;
+      rows.push({id:uid(), brand, platform, account_name:account, metric_type:el.dataset.mkfield, metric_value:+v, collected_at:now, source:"Manual", notes});
+    });
+    if(!rows.length){ toast("Enter at least one metric value"); return; }
+    try{ await mktSaveMetrics(rows); }catch(e){ return; }
+    await loadMarketing(); closeModal(); toast("Saved manual snapshot for "+brand+" · "+platform); renderContent();
+  };
+}
+
+/* ---- CSV upload modal ---- */
+function openMktCsvModal(){ if(!requireAdmin()) return; state.modal={type:"mktCsv", parsed:null, error:null}; renderModal(); }
+function renderMktCsvModal(){
+  const md=state.modal, root=$("#modal-root");
+  root.innerHTML=`
+  <div class="modal show"><div class="box" style="max-width:620px">
+    <div class="mh"><h3>CSV Metric Upload</h3><button class="x" id="modalClose">✕</button></div>
+    <div class="mb">
+      <div class="sub" style="margin-bottom:10px">Upload a CSV to bulk-add manual snapshots. Required columns (header row):</div>
+      <div class="hint" style="margin-bottom:12px"><code class="k">brand,platform,account,metric,value,date,notes</code><br>
+        <b>metric</b> = one of: ${MKT_METRICS.map(m=>m.k).join(", ")}, engagementRate, growthRate. <b>date</b> optional (defaults to now). Rows are saved with source “Manual / CSV”.</div>
+      <input type="file" id="mk_file" accept=".csv,text/csv"/>
+      ${md.error?`<div class="banner demo" style="margin-top:12px">${esc(md.error)}</div>`:''}
+      ${md.parsed?`<div class="hint" style="margin-top:12px">✓ Parsed <b>${md.parsed.length}</b> metric rows ready to import.</div>`:''}
+    </div>
+    <div class="mf"><button class="btn" id="modalCancel">Cancel</button><button class="btn primary" id="mk_import" ${md.parsed&&md.parsed.length?'':'disabled'}>Import ${md.parsed?md.parsed.length:0} rows</button></div>
+  </div></div>`;
+  $("#modalClose").onclick=closeModal; $("#modalCancel").onclick=closeModal;
+  $("#mk_file").onchange=e=>{
+    const file=e.target.files[0]; if(!file) return;
+    const reader=new FileReader();
+    reader.onload=()=>{ try{ md.parsed=parseMktCsv(String(reader.result)); md.error=md.parsed.length?null:"No valid rows found."; }
+      catch(err){ md.parsed=null; md.error=String(err.message||err); } renderModal(); };
+    reader.readAsText(file);
+  };
+  $("#mk_import").onclick=async()=>{
+    if(!md.parsed||!md.parsed.length) return;
+    try{ await mktSaveMetrics(md.parsed); }catch(e){ return; }
+    await loadMarketing(); closeModal(); toast("Imported "+md.parsed.length+" metric rows"); renderContent();
+  };
+}
+function parseMktCsv(text){
+  const lines=text.split(/\r?\n/).filter(l=>l.trim().length);
+  if(lines.length<2) throw new Error("CSV needs a header row and at least one data row.");
+  const split=l=>{ const out=[]; let cur="",q=false; for(let i=0;i<l.length;i++){ const ch=l[i];
+    if(ch==='"'){ if(q&&l[i+1]==='"'){cur+='"';i++;} else q=!q; } else if(ch===","&&!q){ out.push(cur); cur=""; } else cur+=ch; } out.push(cur); return out.map(s=>s.trim()); };
+  const head=split(lines[0]).map(h=>h.toLowerCase());
+  const idx=n=>head.indexOf(n);
+  const ci={brand:idx("brand"),platform:idx("platform"),account:idx("account"),metric:idx("metric"),value:idx("value"),date:idx("date"),notes:idx("notes")};
+  if(ci.brand<0||ci.platform<0||ci.metric<0||ci.value<0) throw new Error("CSV must include brand, platform, metric, and value columns.");
+  const rows=[];
+  for(let i=1;i<lines.length;i++){
+    const cols=split(lines[i]); const v=cols[ci.value];
+    if(v==null||v===""||isNaN(+v)) continue;
+    const brand=cols[ci.brand]||"—", platform=cols[ci.platform]||"—";
+    const date=ci.date>=0&&cols[ci.date]?new Date(cols[ci.date]):new Date();
+    rows.push({id:uid(), brand, platform, account_name:(ci.account>=0&&cols[ci.account])||brand,
+      metric_type:cols[ci.metric], metric_value:+v, collected_at:(isNaN(date.getTime())?new Date():date).toISOString(),
+      source:"Manual / CSV", notes:(ci.notes>=0&&cols[ci.notes])||""});
+  }
+  return rows;
 }
 
 /* ---- Calendar -------------------------------------------------------------- */
@@ -1779,6 +2232,8 @@ function renderModal(){
   if(state.modal.type==="import") return renderImportModal();
   if(state.modal.type==="attach") return renderAttachmentModal();
   if(state.modal.type==="confirmDelete") return renderConfirmDeleteModal();
+  if(state.modal.type==="mktManual") return renderMktManualModal();
+  if(state.modal.type==="mktCsv") return renderMktCsvModal();
   return renderTaskModal();
 }
 
@@ -2250,6 +2705,98 @@ function renderImportModal(){
    index.html calls it like:
      fetch('/api/send-email', { method:'POST', headers:{'Content-Type':'application/json'},
        body: JSON.stringify({ to, cc, kind, event, task }) });
+
+4) MARKETING PERFORMANCE (new section — fully isolated from the task board)
+   Tracks brands/accounts (Relocators, Nobody Move, Sisters in Charge, Rob's
+   Personal) across Instagram, Facebook, TikTok, YouTube and LinkedIn. Live
+   numbers are fetched server-side and a timestamped snapshot is stored so growth
+   can be measured over time. Manual entry + CSV upload work even with no API keys.
+
+   a) Supabase SQL — run this in Supabase -> SQL Editor (history tables):
+
+        create table if not exists public.marketing_metrics (
+          id text primary key,
+          brand text,
+          platform text,
+          account_name text,
+          metric_type text,
+          metric_value numeric,
+          collected_at timestamptz not null default now(),
+          source text,
+          notes text
+        );
+        create index if not exists marketing_metrics_lookup
+          on public.marketing_metrics (brand, platform, metric_type, collected_at);
+
+        create table if not exists public.marketing_posts (
+          id text primary key,
+          brand text,
+          platform text,
+          account_name text,
+          post_title text,
+          post_date timestamptz,
+          views numeric default 0,
+          likes numeric default 0,
+          comments numeric default 0,
+          shares numeric default 0,
+          saves numeric default 0,
+          engagement_rate numeric default 0,
+          link text,
+          source text,
+          collected_at timestamptz not null default now()
+        );
+
+        -- Optional: a simple reference table of the accounts being tracked.
+        create table if not exists public.marketing_accounts (
+          id text primary key,
+          brand text,
+          platform text,
+          account_name text,
+          connected boolean default false,
+          source text,
+          notes text,
+          updated_at timestamptz not null default now()
+        );
+
+        alter table public.marketing_metrics  enable row level security;
+        alter table public.marketing_posts    enable row level security;
+        alter table public.marketing_accounts enable row level security;
+
+        -- Internal shared dashboard (anon key, same trust model as `tasks`).
+        create policy "mm read"   on public.marketing_metrics  for select using (true);
+        create policy "mm write"  on public.marketing_metrics  for insert with check (true);
+        create policy "mm update" on public.marketing_metrics  for update using (true) with check (true);
+        create policy "mp read"   on public.marketing_posts    for select using (true);
+        create policy "mp write"  on public.marketing_posts    for insert with check (true);
+        create policy "mp update" on public.marketing_posts    for update using (true) with check (true);
+        create policy "ma read"   on public.marketing_accounts for select using (true);
+        create policy "ma write"  on public.marketing_accounts for insert with check (true);
+        create policy "ma update" on public.marketing_accounts for update using (true) with check (true);
+
+   b) Vercel env vars (server-side only — never exposed in the page). Add the
+      ones you have; missing keys simply show "Not connected" (nothing crashes):
+        META_ACCESS_TOKEN, META_PAGE_ID, INSTAGRAM_BUSINESS_ACCOUNT_ID, META_BRAND
+        YOUTUBE_API_KEY, YOUTUBE_CHANNEL_ID, YOUTUBE_BRAND
+        TIKTOK_ACCESS_TOKEN, TIKTOK_BRAND
+        LINKEDIN_ACCESS_TOKEN, LINKEDIN_ORG_ID, LINKEDIN_BRAND
+      (The *_BRAND vars label which brand each platform's account belongs to,
+       e.g. META_BRAND="Relocators". They default to the platform name.)
+
+   c) API routes (already in the repo, ESM serverless functions):
+        /api/marketing/refresh   -> fetches every connected platform, returns JSON
+        /api/marketing/meta, /api/marketing/youtube,
+        /api/marketing/tiktok, /api/marketing/linkedin  (per-platform)
+      Shared fetch logic lives in lib/marketing.js (env-driven, never throws).
+
+   d) Refresh: the "Refresh Metrics" button calls /api/marketing/refresh, then
+      writes a snapshot to marketing_metrics/marketing_posts and redraws. For an
+      automatic daily snapshot, add a Vercel Cron hitting /api/marketing/refresh
+      (Vercel -> Project -> Settings -> Cron Jobs), e.g. schedule "0 8 * * *".
+
+   e) Notes on platform approval: YouTube (API key) and Meta/Instagram (Graph API
+      token) work immediately once keys are set. TikTok and LinkedIn require app
+      review + OAuth; until approved they show "Connect account to enable live
+      data" and you can use Manual Entry / CSV Upload in the meantime.
 ================================================================================
 -->
 </body>
