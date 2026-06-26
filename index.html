@@ -1510,6 +1510,29 @@ function mktFmt(v){
   return String(Math.round(v));
 }
 function mktDateStr(d){ d=d||new Date(); return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10); }
+/* UI number formatting: full numbers WITH commas (blank/null shows "—").
+   mktFmt (K/M abbreviation) is kept only for compact chart axis labels. */
+function mktComma(v){ return (v==null||v==="")?"—":Number(v).toLocaleString("en-US"); }
+function mktSigned(v){ if(v==null||v==="") return "—"; const n=Number(v); return (n>0?"+":"")+n.toLocaleString("en-US"); }
+/* Week-over-week growth % from current followers + the WoW change (rounded to
+   match provided integer percentages; previous = current - change). */
+function mktGrowthPct(cur, change){
+  if(cur==null||change==null) return "—";
+  const prev=cur-change; if(prev<=0) return "—";
+  const g=change/prev*100; return (g>0?"+":"")+Math.round(g)+"%";
+}
+/* Monday-start week helpers (official Mon–Sun reporting week). */
+function mktWeekLabel(monday){
+  const s=new Date(monday+"T00:00:00"), e=new Date(s); e.setDate(s.getDate()+6);
+  const mo=d=>d.toLocaleDateString('en-US',{month:'short'});
+  return `${mo(s)} ${s.getDate()} - ${mo(e)} ${e.getDate()}, ${e.getFullYear()}`;
+}
+function mktWeekShort(monday){ return new Date(monday+"T00:00:00").toLocaleDateString('en-US',{month:'short',day:'numeric'}); }
+/* The same account's snapshot in the immediately previous reporting week. */
+function mktPrevWeekEntry(e){
+  return state.mkt.entries.filter(x=>x.account_name===e.account_name && x.platform===e.platform && x.entry_date < e.entry_date)
+    .sort((a,b)=>b.entry_date.localeCompare(a.entry_date))[0] || null;
+}
 
 /* ---- Calculated fields (all safe when inputs are blank) ---- */
 function mktTotalEngagement(e){
@@ -1538,7 +1561,10 @@ function normMktEntry(r){
     brand:r.brand||"", platform:r.platform||"", account_name:r.account_name||r.account||"",
     top_post_title:r.top_post_title||"", top_post_link:r.top_post_link||"",
     notes:r.notes||"", source:r.source||"Manual" };
-  MKT_NUM_FIELDS.forEach(f=>o[f.k]=mktN(r[f.k]));
+  // Preserve blanks as null (do NOT coerce to 0) so empty values stay empty in
+  // the UI and don't distort follower counts; sums use mktN() so null reads as 0.
+  MKT_NUM_FIELDS.forEach(f=>{ const v=r[f.k];
+    o[f.k]=(v==null||v===""||(typeof v==="string"&&v.trim()===""))?null:(isNaN(+v)?null:+v); });
   return o;
 }
 async function loadMarketing(){
@@ -1686,7 +1712,7 @@ function viewMarketing(){
     : tab==="entry"?mktTabEntry()
     : tab==="platform"?mktTabPlatform()
     : tab==="account"?mktTabAccount()
-    : tab==="weekly"?mktTabPeriod("week")
+    : tab==="weekly"?mktTabWeekly()
     : tab==="monthly"?mktTabPeriod("month")
     : tab==="content"?mktTabContent()
     : mktTabSettings();
@@ -1727,22 +1753,26 @@ function mktTabOverview(){
   const gainedMonth=mktSum(ents.filter(e=>mktMonthKey(e.entry_date)===thisMonth),'new_followers');
   const totViews=mktSum(ents,'views'), totReach=mktSum(ents,'reach'), totImpr=mktSum(ents,'impressions'),
         totEng=mktSum(ents,'engagement'), totPosts=mktSum(ents,'posts_published');
-  const bestPlat=[...mktGroupSum(ents,e=>e.platform,'engagement').entries()].sort((a,b)=>b[1]-a[1])[0];
-  const bestBrand=[...mktGroupSum(ents,e=>e.brand,'engagement').entries()].sort((a,b)=>b[1]-a[1])[0];
+  // "Best" ranks by an activity score = engagement + views, so it stays
+  // meaningful whether the data is post-engagement or follower/views based.
+  const score=(arr)=>mktSum(arr,'engagement')+mktSum(arr,'views');
+  const scoreBy=(keyFn)=>{ const m=new Map(); ents.forEach(e=>{ const g=keyFn(e); if(g==null||g==="")return; if(!m.has(g))m.set(g,[]); m.get(g).push(e); }); return [...m.entries()].map(([k,v])=>[k,score(v)]).sort((a,b)=>b[1]-a[1])[0]; };
+  const bestPlat=scoreBy(e=>e.platform);
+  const bestBrand=scoreBy(e=>e.brand);
   const topAcct=[...mktGroupSum(ents,e=>e.account_name,'new_followers').entries()].sort((a,b)=>b[1]-a[1])[0];
   const kpi=(v,l,a,s)=>`<div class="kpi"><div class="acc" style="background:${a}"></div><div class="v">${v}</div><div class="l">${l}</div>${s?`<div class="sub" style="font-size:11px;margin-top:3px;color:var(--muted2)">${esc(s)}</div>`:''}</div>`;
   const kpis=`<div class="kpis" style="grid-template-columns:repeat(4,1fr)">
-    ${kpi(mktFmt(totFollowers),"Total Followers / Subs","var(--d-marketing)")}
-    ${kpi('+'+mktFmt(gainedWeek),"Gained This Week","var(--d-finance)")}
-    ${kpi('+'+mktFmt(gainedMonth),"Gained This Month","var(--d-finance)")}
-    ${kpi(mktFmt(totViews),"Total Views","var(--d-sales)")}
-    ${kpi(mktFmt(totReach),"Total Reach","var(--d-operations)")}
-    ${kpi(mktFmt(totImpr),"Total Impressions","var(--accent)")}
-    ${kpi(mktFmt(totEng),"Total Engagement","var(--d-managers)")}
-    ${kpi(mktFmt(totPosts),"Posts Published","var(--d-admin)")}
-    ${kpi(bestPlat?esc(bestPlat[0]):'—',"Best Platform","var(--d-sales)",bestPlat?mktFmt(bestPlat[1])+' engagement':'')}
-    ${kpi(bestBrand?esc(bestBrand[0]):'—',"Best Brand","var(--d-marketing)",bestBrand?mktFmt(bestBrand[1])+' engagement':'')}
-    ${kpi(topAcct?esc(topAcct[0]):'—',"Top Account by Growth","var(--d-finance)",topAcct?'+'+mktFmt(topAcct[1])+' new':'')}
+    ${kpi(mktComma(totFollowers),"Total Followers / Subs","var(--d-marketing)")}
+    ${kpi(mktSigned(gainedWeek),"Gained This Week","var(--d-finance)")}
+    ${kpi(mktSigned(gainedMonth),"Gained This Month","var(--d-finance)")}
+    ${kpi(mktComma(totViews),"Total Views","var(--d-sales)")}
+    ${kpi(mktComma(totReach),"Total Reach","var(--d-operations)")}
+    ${kpi(mktComma(totImpr),"Total Impressions","var(--accent)")}
+    ${kpi(mktComma(totEng),"Total Engagement","var(--d-managers)")}
+    ${kpi(mktComma(totPosts),"Posts Published","var(--d-admin)")}
+    ${kpi(bestPlat?esc(bestPlat[0]):'—',"Best Platform","var(--d-sales)",bestPlat?mktComma(bestPlat[1])+' views+eng':'')}
+    ${kpi(bestBrand?esc(bestBrand[0]):'—',"Best Brand","var(--d-marketing)",bestBrand?mktComma(bestBrand[1])+' views+eng':'')}
+    ${kpi(topAcct?esc(topAcct[0]):'—',"Top Account by Growth","var(--d-finance)",topAcct?mktSigned(topAcct[1])+' new':'')}
   </div>`;
   const dates=mktDates(ents), xl=dates.map(d=>d.slice(5));
   const platColor=p=>MKT_PLATFORM_COLOR[p]||'var(--accent)';
@@ -1772,10 +1802,10 @@ function mktTabEntry(){
     const er=mktEngagementRate(e);
     return `<tr>
       <td>${esc(e.entry_date)}</td><td>${esc(e.brand)}</td><td>${MKT_PLATFORM_ICON[e.platform]||''} ${esc(e.platform)}</td><td>${esc(e.account_name)}</td>
-      <td class="num">${mktFmt(e.followers)}</td><td class="num">${e.new_followers?'+'+mktFmt(e.new_followers):'—'}</td>
-      <td class="num">${mktFmt(e.views)}</td><td class="num">${mktFmt(e.reach)}</td><td class="num">${mktFmt(e.impressions)}</td>
-      <td class="num">${mktFmt(e.likes)}</td><td class="num">${mktFmt(e.comments)}</td><td class="num">${mktFmt(e.shares)}</td><td class="num">${mktFmt(e.saves)}</td>
-      <td class="num">${mktFmt(mktTotalEngagement(e))}</td><td class="num">${mktFmt(e.posts_published)}</td>
+      <td class="num">${mktComma(e.followers)}</td><td class="num ${e.new_followers>0?'mkt-up':e.new_followers<0?'mkt-down':''}">${mktSigned(e.new_followers)}</td>
+      <td class="num">${mktComma(e.views)}</td><td class="num">${mktComma(e.reach)}</td><td class="num">${mktComma(e.impressions)}</td>
+      <td class="num">${mktComma(e.likes)}</td><td class="num">${mktComma(e.comments)}</td><td class="num">${mktComma(e.shares)}</td><td class="num">${mktComma(e.saves)}</td>
+      <td class="num">${mktComma(mktTotalEngagement(e)||null)}</td><td class="num">${mktComma(e.posts_published)}</td>
       <td>${er!=null?er.toFixed(1)+'%':'—'}</td>
       <td>${e.top_post_link?`<a href="${esc(e.top_post_link)}" target="_blank" rel="noreferrer">${esc((e.top_post_title||'link').slice(0,28))}</a>`:(esc((e.top_post_title||'').slice(0,28))||'—')}</td>
       <td><span class="mkt-tag manual">${esc(e.source||'Manual')}</span></td>
@@ -1806,12 +1836,26 @@ function mktTabPlatform(){
   const engByPlat=MKT_PLATFORMS.map(p=>({label:p,value:mktSum(ents.filter(e=>e.platform===p),'engagement'),color:platColor(p)})).filter(d=>d.value>0);
   const brandCols=['#a06bff','#f5c542','#3ec98a','#4a90e2'];
   const engByBrand=MKT_BRANDS.map((b,i)=>({label:b,value:mktSum(ents.filter(e=>e.brand===b),'engagement'),color:brandCols[i%4]})).filter(d=>d.value>0);
+  const folByBrand=MKT_BRANDS.map((b,i)=>({label:b,value:mktSum(mktLatestPerAccount(ents.filter(e=>e.brand===b)),'followers'),color:brandCols[i%4]})).filter(d=>d.value>0);
+  const viewsByBrand=MKT_BRANDS.map((b,i)=>({label:b,value:mktSum(ents.filter(e=>e.brand===b),'views'),color:brandCols[i%4]})).filter(d=>d.value>0);
   const charts=`<div class="mkt-charts" style="margin-bottom:16px">
     ${mktBarChart("Followers by Platform",folByPlat)}
     ${mktBarChart("Views by Platform",viewsByPlat)}
-    ${mktBarChart("Engagement by Platform",engByPlat)}
-    ${mktBarChart("Brand Comparison (Engagement)",engByBrand)}
+    ${mktBarChart("Followers by Brand",folByBrand)}
+    ${mktBarChart("Views by Brand",viewsByBrand)}
   </div>`;
+  // Brand Report (grouped by brand)
+  const brandRows=MKT_BRANDS.filter(b=>ents.some(e=>e.brand===b)).map(b=>{
+    const be=ents.filter(e=>e.brand===b), latest=mktLatestPerAccount(be);
+    const fol=mktSum(latest,'followers'), chg=mktSum(be,'new_followers'), vw=mktSum(be,'views');
+    const plats=[...new Set(be.map(e=>e.platform))].sort((a,b)=>MKT_PLATFORMS.indexOf(a)-MKT_PLATFORMS.indexOf(b));
+    return `<tr><td>${esc(b)}</td><td class="num">${mktComma(fol)}</td>
+      <td class="num ${chg>0?'mkt-up':chg<0?'mkt-down':''}">${mktSigned(chg)}</td><td class="num">${mktComma(vw)}</td>
+      <td class="num">${latest.length}</td><td>${esc(plats.join(", "))}</td></tr>`;
+  }).join("");
+  const brandReport=`<div class="card sect" style="margin-bottom:16px"><h2>🏷️ Brand Report <span class="cnt">${MKT_BRANDS.filter(b=>ents.some(e=>e.brand===b)).length}</span></h2>
+    <div class="sub" style="margin-bottom:10px">Grouped by brand · followers are the latest snapshot per account; WoW change & views summed over the selected range.</div>
+    <div style="overflow-x:auto"><table class="mkt-tbl"><thead><tr><th>Brand</th><th class="num">Followers (latest)</th><th class="num">WoW Change</th><th class="num">Views</th><th class="num">Accounts</th><th>Platforms</th></tr></thead><tbody>${brandRows}</tbody></table></div></div>`;
   const platforms=state.mkt.filt.platform?[state.mkt.filt.platform]:MKT_PLATFORMS;
   const blocks=platforms.map(p=>{
     const pe=ents.filter(e=>e.platform===p);
@@ -1822,17 +1866,17 @@ function mktTabPlatform(){
       const gr=mktGrowthRate(e,acctAll), er=mktEngagementRate(e);
       const s=k=>mktSum(acctAll,k);
       return `<tr><td>${esc(e.brand)}</td><td>${esc(e.account_name)}</td>
-        <td class="num">${mktFmt(e.followers)}</td><td class="num">${mktFmt(s('new_followers'))}</td>
-        <td class="num">${mktFmt(s('views'))}</td><td class="num">${mktFmt(s('reach'))}</td><td class="num">${mktFmt(s('impressions'))}</td>
-        <td class="num">${mktFmt(s('engagement'))}</td><td class="num">${mktFmt(s('posts_published'))}</td>
+        <td class="num">${mktComma(e.followers)}</td><td class="num ${s('new_followers')>0?'mkt-up':s('new_followers')<0?'mkt-down':''}">${mktSigned(s('new_followers'))}</td>
+        <td class="num">${mktComma(s('views')||null)}</td><td class="num">${mktComma(s('reach')||null)}</td><td class="num">${mktComma(s('impressions')||null)}</td>
+        <td class="num">${mktComma(s('engagement')||null)}</td><td class="num">${mktComma(s('posts_published')||null)}</td>
         <td class="${gr>0?'mkt-up':gr<0?'mkt-down':''}">${gr!=null?(gr>0?'+':'')+gr.toFixed(1)+'%':'—'}</td>
         <td>${er!=null?er.toFixed(1)+'%':'—'}</td>
         <td style="max-width:160px;white-space:normal">${esc((e.notes||'').slice(0,50))}</td></tr>`;
     }).join("");
     return `<div class="card sect" style="margin-bottom:16px"><h2>${MKT_PLATFORM_ICON[p]||''} ${esc(p)} Report <span class="cnt">${accounts.length}</span></h2>
-      <div style="overflow-x:auto"><table class="mkt-tbl"><thead><tr><th>Brand</th><th>Account</th><th class="num">Followers</th><th class="num">New</th><th class="num">Views</th><th class="num">Reach</th><th class="num">Impr.</th><th class="num">Engmt</th><th class="num">Posts</th><th>Growth</th><th>Eng.Rate</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+      <div style="overflow-x:auto"><table class="mkt-tbl"><thead><tr><th>Brand</th><th>Account</th><th class="num">Followers</th><th class="num">WoW Change</th><th class="num">Views</th><th class="num">Reach</th><th class="num">Impr.</th><th class="num">Engmt</th><th class="num">Posts</th><th>Growth</th><th>Eng.Rate</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
   }).join("");
-  return charts+blocks;
+  return charts+brandReport+blocks;
 }
 
 /* ---- Account Reports ---- */
@@ -1848,10 +1892,10 @@ function mktTabAccount(){
   const latest=ents[ents.length-1], gr=mktGrowthRate(latest,ents);
   const kpi=(v,l,a)=>`<div class="kpi"><div class="acc" style="background:${a}"></div><div class="v">${v}</div><div class="l">${l}</div></div>`;
   const kpis=`<div class="kpis" style="grid-template-columns:repeat(5,1fr);margin-bottom:16px">
-    ${kpi(mktFmt(latest.followers),"Followers / Subs","var(--d-marketing)")}
-    ${kpi('+'+mktFmt(mktSum(ents,'new_followers')),"New (range)","var(--d-finance)")}
-    ${kpi(mktFmt(mktSum(ents,'views')),"Views","var(--d-sales)")}
-    ${kpi(mktFmt(mktSum(ents,'engagement')),"Engagement","var(--accent)")}
+    ${kpi(mktComma(latest.followers),"Followers / Subs","var(--d-marketing)")}
+    ${kpi(mktSigned(mktSum(ents,'new_followers')),"New (range)","var(--d-finance)")}
+    ${kpi(mktComma(mktSum(ents,'views')||null),"Views","var(--d-sales)")}
+    ${kpi(mktComma(mktSum(ents,'engagement')||null),"Engagement","var(--accent)")}
     ${kpi(gr!=null?(gr>0?'+':'')+gr.toFixed(1)+'%':'—',"Growth Rate","var(--d-operations)")}</div>`;
   const dates=mktDates(ents), xl=dates.map(d=>d.slice(5));
   const charts=`<div class="mkt-charts" style="margin-bottom:16px">
@@ -1862,11 +1906,66 @@ function mktTabAccount(){
   </div>`;
   const content=`<div class="card sect"><h2>🏆 Top Content</h2>${mktContentTable(ents,'views',-1,false)}</div>`;
   const hist=`<div class="card sect" style="margin-top:16px"><h2>Notes & History</h2>
-    ${ents.slice().reverse().map(e=>`<div style="border-bottom:1px solid var(--border);padding:8px 0;font-size:13px"><b>${esc(e.entry_date)}</b> — ${mktFmt(e.followers)} followers${e.new_followers?` <span class="mkt-up">(+${mktFmt(e.new_followers)})</span>`:''}${e.notes?` · ${esc(e.notes)}`:''}</div>`).join("")}</div>`;
+    ${ents.slice().reverse().map(e=>`<div style="border-bottom:1px solid var(--border);padding:8px 0;font-size:13px"><b>${esc(e.entry_date)}</b> — ${mktComma(e.followers)} followers${e.new_followers!=null&&e.new_followers!==0?` <span class="${e.new_followers>0?'mkt-up':'mkt-down'}">(${mktSigned(e.new_followers)})</span>`:''}${e.views!=null?` · ${mktComma(e.views)} views`:''}${e.notes?` · ${esc(e.notes)}`:''}</div>`).join("")}</div>`;
   return header+kpis+charts+content+hist;
 }
 
-/* ---- Weekly / Monthly views ---- */
+/* ---- Weekly View (official Monday–Sunday reporting week) ---- */
+function mktTabWeekly(){
+  const ents=mktFiltered();
+  if(!ents.length) return mktEmpty();
+  const groups=new Map();
+  ents.forEach(e=>{ const k=mktWeekKey(e.entry_date); if(!k) return; if(!groups.has(k)) groups.set(k,[]); groups.get(k).push(e); });
+  const keys=[...groups.keys()].sort();
+  const xl=keys.map(k=>mktWeekShort(k));
+  const charts=`<div class="mkt-charts" style="margin-bottom:16px">
+    ${mktLineChart("Total Followers by Week",xl,[{label:"Followers",color:"#a06bff",points:keys.map(k=>({y:mktSum(groups.get(k),'followers')}))}])}
+    ${mktLineChart("Net Follower Change by Week",xl,[{label:"WoW Change",color:"#3ec98a",points:keys.map(k=>({y:mktSum(groups.get(k),'new_followers')}))}])}
+    ${mktLineChart("Total Views by Week",xl,[{label:"Views",color:"#4a90e2",points:keys.map(k=>({y:mktSum(groups.get(k),'views')}))}])}
+    ${mktBarChart("Views by Week",keys.map(k=>({label:mktWeekShort(k),value:mktSum(groups.get(k),'views'),color:'#4a90e2'})))}
+  </div>`;
+  // Best & worst WoW growth across the visible range (report #6)
+  const changedAll=ents.filter(e=>e.new_followers!=null);
+  const bwRow=(e,cls)=>`<tr><td>${esc(mktWeekShort(mktWeekKey(e.entry_date)))}</td><td>${esc(e.brand)}</td><td>${MKT_PLATFORM_ICON[e.platform]||''} ${esc(e.platform)}</td><td class="num ${cls}">${mktSigned(e.new_followers)}</td><td class="num">${mktGrowthPct(e.followers,e.new_followers)}</td></tr>`;
+  const gains=changedAll.slice().sort((a,b)=>b.new_followers-a.new_followers).slice(0,5);
+  const losses=changedAll.slice().sort((a,b)=>a.new_followers-b.new_followers).slice(0,5);
+  const bestWorst=changedAll.length?`<div class="grid2" style="margin-bottom:16px">
+    <div class="card sect"><h2>🏆 Best Growth — Top WoW Gains</h2><div style="overflow-x:auto"><table class="mkt-tbl"><thead><tr><th>Week</th><th>Brand</th><th>Platform</th><th class="num">WoW Change</th><th class="num">Growth %</th></tr></thead><tbody>${gains.map(e=>bwRow(e,'mkt-up')).join("")}</tbody></table></div></div>
+    <div class="card sect"><h2>📉 Worst Growth — Largest WoW Losses</h2><div style="overflow-x:auto"><table class="mkt-tbl"><thead><tr><th>Week</th><th>Brand</th><th>Platform</th><th class="num">WoW Change</th><th class="num">Growth %</th></tr></thead><tbody>${losses.map(e=>bwRow(e,'mkt-down')).join("")}</tbody></table></div></div>
+  </div>`:'';
+  // Per-week detail blocks (newest first)
+  const blocks=keys.slice().reverse().map(monday=>{
+    const g=groups.get(monday).slice().sort((a,b)=> a.platform===b.platform ? a.brand.localeCompare(b.brand) : MKT_PLATFORMS.indexOf(a.platform)-MKT_PLATFORMS.indexOf(b.platform));
+    const totCur=mktSum(g,'followers'), totChg=mktSum(g,'new_followers'), totVw=mktSum(g,'views');
+    const changed=g.filter(e=>e.new_followers!=null);
+    const best=changed.slice().sort((a,b)=>b.new_followers-a.new_followers)[0];
+    const worst=changed.slice().sort((a,b)=>a.new_followers-b.new_followers)[0];
+    const rows=g.map(e=>{
+      const prevE=mktPrevWeekEntry(e);
+      const prev = prevE ? prevE.followers : (e.followers!=null&&e.new_followers!=null ? e.followers-e.new_followers : null);
+      return `<tr><td>${esc(e.brand)}</td><td>${MKT_PLATFORM_ICON[e.platform]||''} ${esc(e.platform)}</td>
+        <td class="num">${mktComma(e.followers)}</td><td class="num">${mktComma(prev)}</td>
+        <td class="num ${e.new_followers>0?'mkt-up':e.new_followers<0?'mkt-down':''}">${mktSigned(e.new_followers)}</td>
+        <td class="num">${mktGrowthPct(e.followers,e.new_followers)}</td>
+        <td class="num">${mktComma(e.views)}</td></tr>`;
+    }).join("");
+    const bw = (best&&worst)?`<div class="sub" style="margin-top:8px">🏆 Best: <b>${esc(best.brand)} · ${esc(best.platform)}</b> ${mktSigned(best.new_followers)} &nbsp;·&nbsp; 📉 Worst: <b>${esc(worst.brand)} · ${esc(worst.platform)}</b> ${mktSigned(worst.new_followers)}</div>`:'';
+    return `<div class="card sect" style="margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:baseline">
+        <h2 style="margin:0">${esc(mktWeekLabel(monday))}</h2>
+        <div class="sub">Mon–Sun · ${g.length} accounts · Net ${mktSigned(totChg)} followers · ${mktComma(totVw)} views</div>
+      </div>
+      <div style="overflow-x:auto;margin-top:10px"><table class="mkt-tbl">
+        <thead><tr><th>Brand</th><th>Platform</th><th class="num">Current Followers</th><th class="num">Previous Week</th><th class="num">WoW Change</th><th class="num">WoW Growth %</th><th class="num">Views</th></tr></thead>
+        <tbody>${rows}</tbody>
+        <tfoot><tr style="font-weight:700;border-top:2px solid var(--border)"><td colspan="2">Total</td><td class="num">${mktComma(totCur)}</td><td class="num">—</td><td class="num ${totChg>0?'mkt-up':totChg<0?'mkt-down':''}">${mktSigned(totChg)}</td><td class="num">—</td><td class="num">${mktComma(totVw)}</td></tr></tfoot>
+      </table></div>${bw}
+    </div>`;
+  }).join("");
+  return charts+bestWorst+blocks;
+}
+
+/* ---- Monthly view ---- */
 function mktTabPeriod(kind){
   const ents=mktFiltered();
   if(!ents.length) return mktEmpty();
@@ -1881,9 +1980,9 @@ function mktTabPeriod(kind){
     const bestB=[...mktGroupSum(g,e=>e.brand,'engagement').entries()].sort((a,b)=>b[1]-a[1])[0];
     const top=g.slice().sort((a,b)=>mktN(b.views)-mktN(a.views))[0];
     return `<tr><td>${esc(labelFn(k))}</td>
-      <td class="num">${mktFmt(s('new_followers'))}</td><td class="num">${mktFmt(s('views'))}</td>
-      <td class="num">${mktFmt(s('reach'))}</td><td class="num">${mktFmt(s('impressions'))}</td>
-      <td class="num">${mktFmt(s('engagement'))}</td><td class="num">${mktFmt(s('posts_published'))}</td>
+      <td class="num ${s('new_followers')>0?'mkt-up':s('new_followers')<0?'mkt-down':''}">${mktSigned(s('new_followers'))}</td><td class="num">${mktComma(s('views')||null)}</td>
+      <td class="num">${mktComma(s('reach')||null)}</td><td class="num">${mktComma(s('impressions')||null)}</td>
+      <td class="num">${mktComma(s('engagement')||null)}</td><td class="num">${mktComma(s('posts_published')||null)}</td>
       <td>${bestP?esc(bestP[0]):'—'}</td><td>${bestB?esc(bestB[0]):'—'}</td>
       <td style="max-width:200px;white-space:normal">${top?esc((top.top_post_title||top.account_name||'—').slice(0,40)):'—'}</td></tr>`;
   }).join("");
@@ -1915,8 +2014,8 @@ function mktContentTable(ents, sortKey, dir, sortable){
     <td>${esc(e.entry_date)}</td><td>${esc(e.brand)}</td><td>${MKT_PLATFORM_ICON[e.platform]||''} ${esc(e.platform)}</td><td>${esc(e.account_name)}</td>
     <td style="max-width:240px;white-space:normal">${esc((e.top_post_title||'').slice(0,80))||'—'}</td>
     <td>${e.top_post_link?`<a href="${esc(e.top_post_link)}" target="_blank" rel="noreferrer">open</a>`:'—'}</td>
-    <td class="num">${mktFmt(e.views)}</td><td class="num">${mktFmt(e.likes)}</td><td class="num">${mktFmt(e.comments)}</td>
-    <td class="num">${mktFmt(e.shares)}</td><td class="num">${mktFmt(e.saves)}</td><td class="num">${mktFmt(mktTotalEngagement(e))}</td>
+    <td class="num">${mktComma(e.views)}</td><td class="num">${mktComma(e.likes)}</td><td class="num">${mktComma(e.comments)}</td>
+    <td class="num">${mktComma(e.shares)}</td><td class="num">${mktComma(e.saves)}</td><td class="num">${mktComma(mktTotalEngagement(e)||null)}</td>
     <td style="max-width:160px;white-space:normal">${esc((e.notes||'').slice(0,50))}</td></tr>`).join("");
   const th=(k,l,cls)=> sortable?`<th class="sortable ${cls||''}" data-mktsort="${k}">${l}${sortKey===k?(dir<0?' ▼':' ▲'):''}</th>`:`<th class="${cls||''}">${l}</th>`;
   return ents.length?`<div style="overflow-x:auto"><table class="mkt-tbl"><thead><tr>
@@ -2019,7 +2118,8 @@ function renderMktEntryModal(){
   $("#mktEntrySave").onclick=async()=>{
     const row={...e};
     root.querySelectorAll("[data-mke]").forEach(el=>{ const k=el.dataset.mke;
-      if(MKT_NUM_FIELDS.some(f=>f.k===k)) row[k]=mktN(el.value); else row[k]=el.value.trim(); });
+      if(MKT_NUM_FIELDS.some(f=>f.k===k)){ const t=el.value.trim(); row[k]=(t===""||isNaN(+t))?null:+t; }  // blank stays blank
+      else row[k]=el.value.trim(); });
     if(!row.account_name){ toast("Enter an account name"); return; }
     const norm=normMktEntry(row); norm.source=norm.source||"Manual";
     try{ await mktSaveEntry(norm); }catch(err){ return; }
