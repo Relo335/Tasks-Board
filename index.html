@@ -1688,7 +1688,16 @@ function mktScopePlatforms(){ const f=state.mkt.filt;
   return (f.platforms && f.platforms.length) ? MKT_PLATFORMS.filter(p=>f.platforms.includes(p)) : MKT_PLATFORMS.slice(); }
 function mktLatestPerAccount(entries){
   const map=new Map();
-  entries.forEach(e=>{ const k=e.platform+"|"+e.account_name; const cur=map.get(k); if(!cur || e.entry_date>cur.entry_date) map.set(k,e); });
+  // >= so that when two rows share a date the most recently saved one wins.
+  entries.forEach(e=>{ const k=e.platform+"|"+e.account_name; const cur=map.get(k); if(!cur || e.entry_date>=cur.entry_date) map.set(k,e); });
+  return [...map.values()];
+}
+/* Latest entry per account that actually HAS a value for this metric — so a
+   later but still-empty row (e.g. a freshly-opened future week) never hides the
+   real number you last entered. Dashboards use this for the "current" value. */
+function mktLatestWithMetric(entries, metric){
+  const map=new Map();
+  entries.forEach(e=>{ if(e[metric]==null) return; const k=e.platform+"|"+e.account_name; const cur=map.get(k); if(!cur || e.entry_date>=cur.entry_date) map.set(k,e); });
   return [...map.values()];
 }
 function mktAcctKey(e){ return e.platform+"|"+e.account_name; }
@@ -1880,7 +1889,7 @@ function mktPlatformWeekSeries(ents, metric){
 function mktTabSocialDash(){
   const ents=mktFiltered(); if(!ents.length) return mktEmpty("No followers/views data yet. Enter numbers in the Followers Table / Views Table — they feed this dashboard automatically.");
   const M=mktMetricMeta(), metric=M.k, noun=metric==='followers'?'Followers/Subs':'Views';
-  const lat=mktLatestPerAccount(ents);
+  const lat=mktLatestWithMetric(ents, metric);
   const calc=lat.map(e=>({name:e.account_name,brand:e.brand,platform:e.platform,m:mktMetric(e,metric)}));
   const sum=fn=>calc.reduce((s,c)=>{const v=fn(c);return s+(v==null?0:v);},0);
   const avg=fn=>{const xs=calc.map(fn).filter(v=>v!=null);return xs.length?xs.reduce((s,v)=>s+v,0)/xs.length:null;};
@@ -2011,8 +2020,8 @@ function mktTabMoM(){
   }).join("");
   // MoM report: trend (total per month) + per-platform MoM change comparison
   const ents=mktFiltered();
-  const byMonth=new Map(); ents.forEach(e=>{ const mk=mktMonthKey(e.entry_date); if(!mk)return; if(!byMonth.has(mk))byMonth.set(mk,new Map());
-    const am=byMonth.get(mk),k=mktAcctKey(e),cur=am.get(k); if(!cur||e.entry_date>cur.entry_date) am.set(k,e); });
+  const byMonth=new Map(); ents.forEach(e=>{ if(e[metric]==null) return; const mk=mktMonthKey(e.entry_date); if(!mk)return; if(!byMonth.has(mk))byMonth.set(mk,new Map());
+    const am=byMonth.get(mk),k=mktAcctKey(e),cur=am.get(k); if(!cur||e.entry_date>=cur.entry_date) am.set(k,e); });
   const moKeys=[...byMonth.keys()].sort();
   const trend=mktLineChart("Total "+noun+" by Month (month-end)",moKeys.map(mktMonthShort),[{label:noun,color:M.color,points:moKeys.map(mk=>({y:[...byMonth.get(mk).values()].reduce((s,e)=>s+mktN(e[metric]),0)}))}]);
   // selected month's per-account MoM, grouped by platform
