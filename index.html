@@ -415,6 +415,15 @@
     border-radius:7px;padding:6px 8px;font-size:13px;font-variant-numeric:tabular-nums}
   td.mkt-cell input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px rgba(122,162,255,.2)}
   td.mkt-cell input[type=number]{text-align:right}
+  /* Export report preview (dark; the printable version uses its own light CSS) */
+  .rpt h1{font-size:22px;margin:0 0 4px}
+  .rpt h2{font-size:15px;margin:22px 0 10px;border-bottom:1px solid var(--border);padding-bottom:6px}
+  .rmeta{color:var(--muted);font-size:12px;margin-bottom:14px}
+  .rcards{display:flex;flex-wrap:wrap;gap:10px;margin:6px 0 4px}
+  .rcard{border:1px solid var(--border);border-radius:10px;padding:10px 14px;min-width:160px;background:var(--bg)}
+  .rcard .l{font-size:10px;color:var(--muted2);text-transform:uppercase;letter-spacing:.03em}
+  .rcard .v{font-size:17px;font-weight:800;margin-top:2px}
+  .rnotes{white-space:pre-wrap;border:1px solid var(--border);border-radius:9px;padding:10px;font-size:13px;background:var(--bg)}
 </style>
 </head>
 <body>
@@ -552,6 +561,7 @@ const MKT_TABS = [
   {k:"views",       l:"Views Table"},
   {k:"sdash",       l:"Social Followers & Views Dashboard"},
   {k:"mom",         l:"Month-over-Month"},
+  {k:"export",      l:"Export Report"},
   {k:"calendar",    l:"Content Calendar"},
   {k:"tasks",       l:"Marketing Tasks"},
   {k:"scheduled",   l:"Scheduled Content"},
@@ -618,7 +628,7 @@ const state = {
   mkt: { entries:[], accounts:[], content:[], tab:"dashboard", metric:"followers",
          loaded:false, loading:false, tableMissing:false, contentMissing:false,
          filt:{ from:"", to:"", brand:"", platforms:[], account:"", week:"", month:"", owner:"", status:"" },
-         accountSel:"", weekSel:"", monthSel:"", taskDash:null },
+         accountSel:"", weekSel:"", monthSel:"", taskDash:null, reportNotes:"" },
   sb: null                 // supabase client
 };
 
@@ -1815,6 +1825,7 @@ function viewMarketing(){
     : tab==="followers"?mktTabEditable("followers")
     : tab==="views"?mktTabEditable("views")
     : tab==="mom"?mktTabMoM()
+    : tab==="export"?mktTabExport()
     : tab==="calendar"?mktTabCalendar()
     : tab==="tasks"?mktTabTasks()
     : tab==="scheduled"?mktTabScheduled()
@@ -2054,6 +2065,151 @@ function mktTabMoM(){
       ${reportBlocks||'<div class="card sect"><div class="empty">Add a second month of data to see month-over-month comparisons.</div></div>'}`;
 }
 
+/* ===========================================================================
+   EXPORT REPORT — printable (Save-as-PDF) weekly/monthly marketing report + CSV.
+   Uses the SAME filtered data as the dashboard, so numbers always match. Weekly
+   uses Mon–Sun weeks labeled by their Week Ending (Sunday). Followers & Views
+   only — no reach/likes/engagement/etc.
+   =========================================================================== */
+function mktWeekEnding(monday){ return mktAddDays(monday,6); }                                  // Sunday
+function mktWeekEndLabel(monday){ return new Date(mktWeekEnding(monday)+"T00:00:00").toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); }
+function mktWeekEndShort(monday){ return new Date(mktWeekEnding(monday)+"T00:00:00").toLocaleDateString('en-US',{month:'short',day:'numeric'}); }
+function mktNiceDate(d){ return new Date(d+"T00:00:00").toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); }
+function mktReportRange(ents){
+  const f=state.mkt.filt;
+  if(f.from||f.to) return (f.from?mktNiceDate(f.from):'start')+' – '+(f.to?mktNiceDate(f.to):'today');
+  const ds=mktDates(ents); if(!ds.length) return '—';
+  return mktNiceDate(ds[0])+' – '+mktNiceDate(ds[ds.length-1]);
+}
+/* One row per account: current value + WoW + MoM for a metric (latest filled). */
+function mktAccountCurrent(ents, metric){
+  return mktLatestWithMetric(ents, metric).map(e=>({name:e.account_name,brand:e.brand,platform:e.platform,m:mktMetric(e,metric)}))
+    .sort((a,b)=> (MKT_PLATFORMS.indexOf(a.platform)-MKT_PLATFORMS.indexOf(b.platform)) || a.name.localeCompare(b.name));
+}
+function mktWeekEndingSeries(ents, metric){
+  const weeks=[...new Set(ents.map(e=>mktWeekKey(e.entry_date)).filter(Boolean))].sort();
+  return weeks.map(w=>{ const inWk=ents.filter(e=>mktWeekKey(e.entry_date)===w);
+    return {label:mktWeekEndShort(w), value:mktLatestPerAccount(inWk).reduce((s,e)=>s+mktN(e[metric]),0)}; });
+}
+function mktMonthTotalSeries(ents, metric){
+  const byMonth=new Map(); ents.forEach(e=>{ if(e[metric]==null) return; const mk=mktMonthKey(e.entry_date); if(!mk)return; if(!byMonth.has(mk))byMonth.set(mk,new Map());
+    const am=byMonth.get(mk),k=mktAcctKey(e),cur=am.get(k); if(!cur||e.entry_date>=cur.entry_date) am.set(k,e); });
+  return [...byMonth.keys()].sort().map(mk=>({label:mktMonthShort(mk), value:[...byMonth.get(mk).values()].reduce((s,e)=>s+mktN(e[metric]),0)}));
+}
+/* The full report body (shared by the on-screen preview and the print doc). */
+function mktReportHTML(notes){
+  const ents=mktFiltered();
+  const range=mktReportRange(ents);
+  const weeks=[...new Set(ents.map(e=>mktWeekKey(e.entry_date)).filter(Boolean))].sort();
+  const weekEnding=weeks.length?mktWeekEndLabel(weeks[weeks.length-1]):'—';
+  const fol=mktAccountCurrent(ents,'followers'), vw=mktAccountCurrent(ents,'views');
+  const sum=(arr,fn)=>arr.reduce((s,c)=>s+(fn(c)||0),0);
+  const totFol=sum(fol,c=>mktN(c.m.cur)), totFolChg=sum(fol,c=>c.m.wowChange);
+  const totVw=sum(vw,c=>mktN(c.m.cur)), totVwChg=sum(vw,c=>c.m.wowChange);
+  const folRk=fol.filter(c=>c.m.wowGrowth!=null).sort((a,b)=>b.m.wowGrowth-a.m.wowGrowth);
+  const hi=folRk[0], lo=folRk[folRk.length-1];
+  const hiViews=vw.slice().sort((a,b)=>mktN(b.m.cur)-mktN(a.m.cur))[0];
+  const card=(l,v)=>`<div class="rcard"><div class="l">${l}</div><div class="v">${v}</div></div>`;
+  const wkTable=(arr,kind)=>{ const rows=arr.map(c=>`<tr><td>${esc(c.name)}</td><td>${esc(c.platform)}</td>
+      <td class="num">${mktComma(c.m.cur)}</td><td class="num">${mktComma(kind==='wow'?c.m.prevWeek:c.m.prevMonth)}</td>
+      <td class="num">${mktSigned(kind==='wow'?c.m.wowChange:c.m.momChange)}</td><td class="num">${mktPct(kind==='wow'?c.m.wowGrowth:c.m.momGrowth)}</td></tr>`).join("");
+    const h=kind==='wow'?['Current','Prev Week','WoW Δ','WoW %']:['Current','Prev Month','MoM Δ','MoM %'];
+    return `<table class="mkt-tbl"><thead><tr><th>Account</th><th>Platform</th><th class="num">${h[0]}</th><th class="num">${h[1]}</th><th class="num">${h[2]}</th><th class="num">${h[3]}</th></tr></thead><tbody>${rows||'<tr><td colspan="6">No data.</td></tr>'}</tbody></table>`; };
+  const wowBars=arr=>arr.map(c=>({label:c.name,value:c.m.wowChange,color:c.m.wowChange>=0?'#3ec98a':'#ff5a5a'}));
+  const momBars=arr=>arr.map(c=>({label:c.name,value:c.m.momChange,color:c.m.momChange>=0?'#3ec98a':'#ff5a5a'}));
+  return `<div class="rpt">
+    <h1>Marketing Performance Report</h1>
+    <div class="rmeta">Date range: <b>${esc(range)}</b> &nbsp;·&nbsp; Week ending: <b>${esc(weekEnding)}</b> &nbsp;·&nbsp; Generated ${esc(new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}))}</div>
+
+    <h2>1 · Summary</h2>
+    <div class="rcards">
+      ${card("Total Followers/Subs",mktComma(totFol))}
+      ${card("Total Follower Change (WoW)",mktSigned(totFolChg))}
+      ${card("Total Views",mktComma(totVw))}
+      ${card("Total Views Change (WoW)",mktSigned(totVwChg))}
+      ${card("Highest Growth Account",hi?esc(hi.name)+' ('+mktPct(hi.m.wowGrowth)+')':'—')}
+      ${card("Lowest Growth Account",lo?esc(lo.name)+' ('+mktPct(lo.m.wowGrowth)+')':'—')}
+      ${card("Highest Views Account",hiViews?esc(hiViews.name)+' ('+mktComma(hiViews.m.cur)+')':'—')}
+    </div>
+
+    <h2>2 · Weekly Followers Comparison</h2>
+    <div class="mkt-charts">${mktBarChart("Total Followers by Week Ending",mktWeekEndingSeries(ents,'followers'))}${mktBarChart("Follower WoW Change by Account — wk ending "+weekEnding,wowBars(fol))}</div>
+    ${wkTable(fol,'wow')}
+
+    <h2>3 · Weekly Views Comparison</h2>
+    <div class="mkt-charts">${mktBarChart("Total Views by Week Ending",mktWeekEndingSeries(ents,'views'))}${mktBarChart("Views WoW Change by Account — wk ending "+weekEnding,wowBars(vw))}</div>
+    ${wkTable(vw,'wow')}
+
+    <h2>4 · Monthly Followers Comparison</h2>
+    <div class="mkt-charts">${mktBarChart("Total Followers by Month",mktMonthTotalSeries(ents,'followers'))}${mktBarChart("Follower MoM Change by Account",momBars(fol))}</div>
+    ${wkTable(fol,'mom')}
+
+    <h2>5 · Monthly Views Comparison</h2>
+    <div class="mkt-charts">${mktBarChart("Total Views by Month",mktMonthTotalSeries(ents,'views'))}${mktBarChart("Views MoM Change by Account",momBars(vw))}</div>
+    ${wkTable(vw,'mom')}
+
+    <h2>6 · Notes</h2>
+    <div class="rnotes">${notes?esc(notes):'<span style="color:var(--muted2)">No notes added.</span>'}</div>
+  </div>`;
+}
+/* Standalone printable document (light theme, good for PDF/paper). */
+function mktReportDoc(notes){
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Marketing Performance Report</title>
+  <style>
+    :root{--muted2:#888}
+    *{box-sizing:border-box} body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#12141a;background:#fff;margin:26px;font-size:13px}
+    .rpt h1{font-size:22px;margin:0 0 4px} .rmeta{color:#555;font-size:12px;margin-bottom:16px}
+    .rpt h2{font-size:15px;margin:22px 0 10px;border-bottom:2px solid #eaeaea;padding-bottom:6px;break-after:avoid}
+    .mkt-tbl{width:100%;border-collapse:collapse;font-size:12px;margin:6px 0 4px}
+    .mkt-tbl th{text-align:left;padding:6px 8px;border-bottom:1px solid #ccc;color:#666;font-size:10px;text-transform:uppercase;letter-spacing:.03em}
+    .mkt-tbl td{padding:6px 8px;border-bottom:1px solid #eee} .mkt-tbl .num{text-align:right}
+    .mkt-charts{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .mkt-chart{border:1px solid #eaeaea;border-radius:8px;padding:10px;break-inside:avoid}
+    .mkt-chart h3{font-size:12px;margin:0 0 8px;font-weight:700} .mkt-chart svg{width:100%;height:auto}
+    .mkt-chart .empty{color:#999;padding:20px 0;text-align:center}
+    .gl{stroke:#ececec;stroke-width:1} .axt{fill:#666;font-size:9px}
+    .rcards{display:flex;flex-wrap:wrap;gap:10px;margin:6px 0} .rcard{border:1px solid #eaeaea;border-radius:8px;padding:9px 13px;min-width:150px}
+    .rcard .l{font-size:10px;color:#777;text-transform:uppercase;letter-spacing:.03em} .rcard .v{font-size:17px;font-weight:800;margin-top:2px}
+    .rnotes{white-space:pre-wrap;border:1px solid #eaeaea;border-radius:8px;padding:10px;min-height:36px}
+    h2,.mkt-chart,table{break-inside:avoid}
+    @media print{ body{margin:12mm} .mkt-charts{grid-template-columns:1fr 1fr} }
+  </style></head><body>${mktReportHTML(notes)}</body></html>`;
+}
+function mktCurrentReportNotes(){ const el=$("#mktReportNotes"); return el?el.value:(state.mkt.reportNotes||""); }
+function mktPrintReport(){
+  const w=window.open("","_blank","width=980,height=1100");
+  if(!w){ toast("Allow pop-ups for this site to print / save the report as PDF"); return; }
+  w.document.write(mktReportDoc(mktCurrentReportNotes())); w.document.close(); w.focus();
+  setTimeout(()=>{ try{ w.print(); }catch(e){} }, 400);
+}
+function mktDownloadReportCSV(){
+  const ents=mktFiltered();
+  const weeks=[...new Set(ents.map(e=>mktWeekKey(e.entry_date)).filter(Boolean))].sort();
+  const wkEnd=weeks.length?mktWeekEndLabel(weeks[weeks.length-1]):"";
+  const months=[...new Set(ents.map(e=>mktMonthKey(e.entry_date)).filter(Boolean))].sort();
+  const moLbl=months.length?mktMonthLabel(months[months.length-1]):"";
+  const rows=[["Section","Metric","Account","Brand","Platform","Period","Current","Previous","Change","GrowthPct"]];
+  ["followers","views"].forEach(metric=>{ mktAccountCurrent(ents,metric).forEach(c=>{
+    rows.push(["Weekly",metric,c.name,c.brand,c.platform,"Week ending "+wkEnd,c.m.cur,c.m.prevWeek,c.m.wowChange,c.m.wowGrowth!=null?c.m.wowGrowth.toFixed(1):""]);
+    rows.push(["Monthly",metric,c.name,c.brand,c.platform,moLbl,c.m.cur,c.m.prevMonth,c.m.momChange,c.m.momGrowth!=null?c.m.momGrowth.toFixed(1):""]);
+  }); });
+  const csv=rows.map(r=>r.map(csvCell).join(",")).join("\n");
+  const blob=new Blob([csv],{type:"text/csv"}); const url=URL.createObjectURL(blob);
+  const a=document.createElement("a"); a.href=url; a.download="marketing-report.csv"; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  toast("CSV downloaded");
+}
+function mktTabExport(){
+  const ents=mktFiltered();
+  const notes=mktCurrentReportNotes();
+  return `<div class="card sect" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px">
+      <div><h2 style="margin:0">Export Weekly Report</h2><div class="sub" style="margin-top:2px">Reflects the filters above and the latest table edits — the export always matches the dashboard. Print → choose “Save as PDF”.</div></div>
+      <div style="display:flex;gap:8px"><button class="btn primary" id="mktPrint">🖨 Print / Save as PDF</button><button class="btn" id="mktCsv2">⬇ CSV</button></div>
+    </div>
+    <div class="card sect" style="margin-bottom:14px"><h2 style="margin:0 0 8px">Report Notes (optional)</h2>
+      <textarea id="mktReportNotes" style="width:100%;min-height:64px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:9px;padding:10px;font-size:13px" placeholder="Short summary to include on the report for Rob…">${esc(notes)}</textarea></div>
+    <div class="card sect">${ents.length?mktReportHTML(notes):`<div class="empty">No data in the current filter. Enter followers/views in the tables first.</div>`}</div>`;
+}
+
 /* ---- Content Calendar ---- */
 function mktFilteredContent(){
   const f=state.mkt.filt;
@@ -2225,6 +2381,10 @@ function bindMarketing(c){
     try{ await mktSaveEntry(e); toast("Saved"); }catch(err){}
     renderContent();
   });
+  // export report
+  const pr=$("#mktPrint"); if(pr) pr.onclick=mktPrintReport;
+  const cv2=$("#mktCsv2"); if(cv2) cv2.onclick=mktDownloadReportCSV;
+  const rn=$("#mktReportNotes"); if(rn) rn.oninput=()=>{ state.mkt.reportNotes=rn.value; };
   // content calendar
   const ac=$("#mktAddContent"); if(ac) ac.onclick=()=>openMktContentModal();
   c.querySelectorAll("[data-mktcedit]").forEach(el=>el.onclick=()=>openMktContentModal(el.dataset.mktcedit));
@@ -3227,10 +3387,14 @@ function renderImportModal(){
    d) MARKETING OPERATIONS (expanded). The Marketing nav item is now the
       marketing team's operating area, with sub-tabs: Marketing Dashboard,
       Followers Table, Views Table, Social Followers & Views Dashboard,
-      Month-over-Month, Content Calendar, Marketing Tasks, Scheduled Content,
-      Completed Marketing Tasks, Settings. Followers/Views are edited in their
-      tables and feed ONE Social dashboard (WoW + platform-grouped graphs) plus
-      a Month-over-Month tab (editable month-end table + MoM report).
+      Month-over-Month, Export Report, Content Calendar, Marketing Tasks,
+      Scheduled Content, Completed Marketing Tasks, Settings. Followers/Views are
+      edited in their tables and feed ONE Social dashboard (WoW + platform-
+      grouped graphs), a Month-over-Month tab (editable month-end table + MoM
+      report), and an Export Report tab (printable → Save-as-PDF + CSV; weekly
+      by Week Ending/Sunday and monthly comparisons, both metrics). Export uses
+      the same filtered data as the dashboard — client-side only, no SQL/Vercel
+      changes.
       - Only TWO performance metrics: Followers/Subscribers and Views (metric
         toggle). Followers/Views tables are DIRECTLY EDITABLE per account, by
         week; WoW (Mon–Sun) and MoM (calendar month) are auto-calculated. Data
