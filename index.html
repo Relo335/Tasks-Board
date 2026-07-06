@@ -495,7 +495,15 @@ const REMINDER_OPTIONS = [
    row is a dated snapshot for one brand+platform+account, saved to Supabase
    (table marketing_entries) or localStorage in demo mode. All reports, KPIs and
    charts are computed purely from these manual entries. */
-const MKT_BRANDS = ["Relocators","Nobody Move","Sisters in Charge","Robert Personal","Relocators & Sisters in Charge","Elle Jae's Corner","Tony Video"];
+const MKT_BRANDS = ["Relocators","Nobody Move","Sisters in Charge","Robert Personal","Relocators & Sisters in Charge","Elle Jae's Corner","Rob Author"];
+/* Accounts hidden from all Marketing reports/tables/filters. Their rows stay in
+   Supabase (not deleted) but are filtered out on load. Key = "Platform|Name". */
+const MKT_HIDDEN_ACCOUNTS = ["YouTube|Tony Video YouTube"];
+/* Relabel old account rows on load (display + persists on next edit) without
+   deleting data. Key = "Platform|OldName" → { name, brand }. */
+const MKT_RENAME = {
+  "YouTube|Relocators YouTube": { name:"Rob Author YouTube", brand:"Rob Author" }
+};
 const MKT_PLATFORMS = ["Facebook","Instagram","TikTok","YouTube","LinkedIn"];
 const MKT_PLATFORM_ICON = {Instagram:"📸",Facebook:"📘",TikTok:"🎵",YouTube:"▶️",LinkedIn:"💼"};
 const MKT_PLATFORM_COLOR = {Instagram:"#e1306c",Facebook:"#1877f2",TikTok:"#00d4c4",YouTube:"#ff0000",LinkedIn:"#0a66c2"};
@@ -514,7 +522,7 @@ const MKT_DEFAULT_ACCOUNTS = [
   {brand:"Relocators",       platform:"TikTok",   name:"Relocators TikTok"},
   {brand:"Relocators & Sisters in Charge", platform:"YouTube", name:"Relocators & Sisters in Charge YouTube"},
   {brand:"Elle Jae's Corner",platform:"YouTube",  name:"Elle Jae's Corner YouTube"},
-  {brand:"Tony Video",       platform:"YouTube",  name:"Tony Video YouTube"},
+  {brand:"Rob Author",       platform:"YouTube",  name:"Rob Author YouTube"},
   {brand:"Nobody Move",      platform:"YouTube",  name:"Nobody Move YouTube"},
   {brand:"Robert Personal",  platform:"LinkedIn", name:"Robert Personal LinkedIn"}
 ];
@@ -1585,6 +1593,10 @@ function normMktEntry(r){
   o.week_end   = r.week_end   ? String(r.week_end).slice(0,10)   : null;
   o.prev_followers = numOrNull(r.prev_followers);
   o.wow_growth     = numOrNull(r.wow_growth);
+  // Relabel retired account names (e.g. Relocators YouTube → Rob Author YouTube)
+  // without deleting the underlying row; persists under the new name on next edit.
+  const rn = MKT_RENAME[o.platform+"|"+o.account_name];
+  if(rn){ o.account_name = rn.name; if(rn.brand) o.brand = rn.brand; }
   return o;
 }
 function normMktContent(r){
@@ -1617,6 +1629,9 @@ async function loadMarketing(){
     state.mkt.entries=state.mkt.entries||[]; state.mkt.accounts=state.mkt.accounts||[]; state.mkt.content=state.mkt.content||[];
     state.mkt.tableMissing=/relation|does not exist|schema cache|could not find the table|not exist/i.test(String(e.message||e));
   }
+  // Hide retired accounts (e.g. Tony Video YouTube) from all reports/tables/
+  // filters/charts. Rows remain in Supabase; they're just filtered out here.
+  state.mkt.entries=(state.mkt.entries||[]).filter(e=>!MKT_HIDDEN_ACCOUNTS.includes(e.platform+"|"+e.account_name));
   state.mkt.loading=false; state.mkt.loaded=true;
 }
 const MKT_OPT_COLS = ["week_start","week_end","prev_followers","wow_growth"];
@@ -1663,7 +1678,7 @@ async function mktSaveAccounts(){
 }
 function mktAccounts(){
   const map=new Map();
-  const add=(brand,platform,name)=>{ if(!name||!platform) return; const k=platform+"|"+name; if(!map.has(k)) map.set(k,{brand:brand||"",platform,name}); };
+  const add=(brand,platform,name)=>{ if(!name||!platform) return; const k=platform+"|"+name; if(MKT_HIDDEN_ACCOUNTS.includes(k)) return; if(!map.has(k)) map.set(k,{brand:brand||"",platform,name}); };
   MKT_DEFAULT_ACCOUNTS.forEach(a=>add(a.brand,a.platform,a.name));
   (state.mkt.accounts||[]).forEach(a=>add(a.brand,a.platform,a.name));
   (state.mkt.entries||[]).forEach(e=>add(e.brand,e.platform,e.account_name));
