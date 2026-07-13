@@ -494,6 +494,12 @@ const MANAGERS = ["Sammy","Lisa","Dyana","Leo","Dawn","Rob"];
 const ADMINS = ["sammy","rob","robert"];
 const PRIORITIES = ["Critical","High","Normal","Low"];
 const CADENCES = ["One Off","Daily","Weekly","Bi-Weekly","Monthly","Quarterly"];
+/* Master switch for automatic recurring-task regeneration. When FALSE, marking a
+   recurring task "Completed/Approved" archives it (kept for reporting/history)
+   but does NOT create the next Daily/Weekly/Monthly/Quarterly/etc. occurrence.
+   The recurring logic itself is untouched — flip this back to true to restore
+   automatic regeneration. */
+const RECURRING_TASK_REGENERATION_ENABLED = false;
 const REMINDER_OPTIONS = [
   {v:15,l:"15 minutes before due"},{v:30,l:"30 minutes before due"},
   {v:60,l:"1 hour before due"},{v:120,l:"2 hours before due"},{v:1440,l:"1 day before due"}
@@ -955,7 +961,9 @@ async function markDone(t){
   if(t.requiresApproval && t.status!=="For Approval" && !isDone(t)){
     return submitForApproval(t);
   }
-  const recurring = isRecurring(t);   // One Off does not spawn a next task
+  // One Off never spawns a next task; recurring spawning is also globally gated
+  // by RECURRING_TASK_REGENERATION_ENABLED (paused for now).
+  const recurring = isRecurring(t) && RECURRING_TASK_REGENERATION_ENABLED;
   const alreadySpawned = t._spawned;
   // Archive the completed instance — kept in Supabase for reporting/history,
   // hidden from the active board.
@@ -963,7 +971,7 @@ async function markDone(t){
   t.archived = true;
   t.completedAt = new Date().toISOString();
   t.completedBy = state.user || "";
-  t.completionType = recurring ? "recurring_completed" : "one_off_completed";
+  t.completionType = isRecurring(t) ? "recurring_completed" : "one_off_completed";
   t.lastUpdate = new Date().toISOString();
   addActivity(t, "Completed/Approved");
   if(recurring && !alreadySpawned){
