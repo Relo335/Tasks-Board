@@ -388,11 +388,14 @@
   .mkt-chart svg{display:block;width:100%;height:auto;overflow:visible}
   .mkt-chart .gl{stroke:var(--border);stroke-width:1}
   .mkt-chart .axt{fill:var(--muted2);font-size:9px}
+  .mkt-chart .axt.bval{fill:var(--text);font-size:8.5px;font-weight:700}
+  .mkt-chart .axt.xw{fill:var(--muted);font-size:9.5px;font-weight:600}
   .mkt-charts{display:grid;grid-template-columns:1fr 1fr;gap:14px}
   @media(max-width:900px){.mkt-charts{grid-template-columns:1fr}}
-  .mkt-legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px;font-size:11px;color:var(--muted)}
-  .mkt-legend span{display:inline-flex;align-items:center;gap:5px}
-  .mkt-legend i{width:10px;height:10px;border-radius:3px;display:inline-block}
+  .mkt-legend{display:flex;flex-wrap:wrap;gap:8px 14px;margin-top:10px;font-size:12px;color:var(--text);
+    background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:9px 11px}
+  .mkt-legend span{display:inline-flex;align-items:center;gap:6px;font-weight:600}
+  .mkt-legend i{width:13px;height:13px;border-radius:4px;display:inline-block;flex:0 0 auto}
   .mkt-up{color:var(--d-finance);font-weight:700}
   .mkt-down{color:var(--red);font-weight:700}
   .mkt-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
@@ -1780,16 +1783,16 @@ function mktLineChart(title, xLabels, series){
   return `<div class="mkt-chart"><h3>${esc(title)}</h3><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${grid}${paths}${xlab}</svg>${legend}</div>`;
 }
 function mktBarChart(title, data){
-  const W=520,H=220,pl=46,pr=12,pt=12,pb=54, iw=W-pl-pr, ih=H-pt-pb;
+  const W=520,H=228,pl=46,pr=12,pt=20,pb=56, iw=W-pl-pr, ih=H-pt-pb;
   data=(data||[]).filter(d=>d&&d.value!=null);
   if(!data.length) return `<div class="mkt-chart"><h3>${esc(title)}</h3><div class="empty" style="padding:30px 0">No data.</div></div>`;
   const vals=data.map(d=>d.value), maxY=Math.max(1,...vals), minY=Math.min(0,...vals);
   const n=data.length, gap=iw/n, bw=Math.min(46,gap*0.62), yAt=v=>pt+ih-((v-minY)/((maxY-minY)||1))*ih, zero=yAt(0);
   const grid=[0,.5,1].map(t=>{ const v=minY+t*(maxY-minY), y=yAt(v); return `<line class="gl" x1="${pl}" y1="${y.toFixed(1)}" x2="${W-pr}" y2="${y.toFixed(1)}"/><text class="axt" x="${pl-6}" y="${(y+3).toFixed(1)}" text-anchor="end">${mktFmt(v)}</text>`; }).join("");
-  const bars=data.map((d,i)=>{ const x=pl+gap*i+(gap-bw)/2, y=yAt(d.value), h=Math.abs(y-zero), top=Math.min(y,zero);
+  const bars=data.map((d,i)=>{ const x=pl+gap*i+(gap-bw)/2, y=yAt(d.value), h=Math.abs(y-zero), top=Math.min(y,zero), cx=x+bw/2;
     return `<rect x="${x.toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(0,h).toFixed(1)}" rx="3" fill="${d.color||'var(--accent)'}"/>
-      <text class="axt" x="${(x+bw/2).toFixed(1)}" y="${(top-4).toFixed(1)}" text-anchor="middle">${mktFmt(d.value)}</text>
-      <text class="axt" x="${(x+bw/2).toFixed(1)}" y="${H-30}" text-anchor="end" transform="rotate(-35 ${(x+bw/2).toFixed(1)} ${H-30})">${esc((d.label||'').slice(0,16))}</text>`; }).join("");
+      <text class="axt bval" x="${cx.toFixed(1)}" y="${(top-5).toFixed(1)}" text-anchor="middle">${mktComma(d.value)}</text>
+      <text class="axt" x="${cx.toFixed(1)}" y="${H-30}" text-anchor="end" transform="rotate(-35 ${cx.toFixed(1)} ${H-30})">${esc((d.label||'').slice(0,18))}</text>`; }).join("");
   return `<div class="mkt-chart"><h3>${esc(title)}</h3><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${grid}${bars}</svg></div>`;
 }
 function mktAccountSeries(ents, metric){
@@ -2103,19 +2106,25 @@ function mktMonthTotalSeries(ents, metric){
 /* Grouped bar chart: x-axis categories (week endings/months), one bar series
    per account, so accounts stay separate within a platform (never combined). */
 function mktGroupedBarChart(title, categories, series){
-  const W=560,H=250,pl=46,pr=12,pt=12,pb=52, iw=W-pl-pr, ih=H-pt-pb;
+  // Taller chart + top room so the comma-formatted value labels above each bar
+  // aren't clipped. Values are drawn vertically so they never overlap.
+  const W=560,H=300,pl=46,pr=12,pt=30,pb=40, iw=W-pl-pr, ih=H-pt-pb;
   const all=series.flatMap(s=>s.values.filter(v=>v!=null));
   if(!categories.length||!series.length||!all.length) return `<div class="mkt-chart"><h3>${esc(title)}</h3><div class="empty" style="padding:24px 0">No data.</div></div>`;
   const maxY=Math.max(1,...all), minY=Math.min(0,...all);
-  const nC=categories.length, groupW=iw/nC, nS=series.length, barW=Math.max(3,Math.min(24,(groupW*0.78)/nS));
+  const nC=categories.length, groupW=iw/nC, nS=series.length, barW=Math.max(6,Math.min(30,(groupW*0.8)/nS));
   const yAt=v=>pt+ih-((v-minY)/((maxY-minY)||1))*ih, zero=yAt(0);
   const grid=[0,.25,.5,.75,1].map(t=>{const v=minY+t*(maxY-minY),y=yAt(v);return `<line class="gl" x1="${pl}" y1="${y.toFixed(1)}" x2="${W-pr}" y2="${y.toFixed(1)}"/><text class="axt" x="${pl-6}" y="${(y+3).toFixed(1)}" text-anchor="end">${mktFmt(v)}</text>`;}).join("");
   const bars=categories.map((cat,ci)=>{ const gx=pl+groupW*ci+(groupW-barW*nS)/2;
-    return series.map((s,si)=>{ const v=s.values[ci]; if(v==null) return ''; const x=gx+si*barW,y=yAt(v),h=Math.abs(y-zero),top=Math.min(y,zero);
-      return `<rect x="${x.toFixed(1)}" y="${top.toFixed(1)}" width="${Math.max(2,barW-1.5).toFixed(1)}" height="${Math.max(0,h).toFixed(1)}" rx="1.5" fill="${s.color}"/>`; }).join(""); }).join("");
-  const xlab=categories.map((cat,ci)=>{ const cx=pl+groupW*ci+groupW/2; return `<text class="axt" x="${cx.toFixed(1)}" y="${H-30}" text-anchor="middle">${esc(cat)}</text>`; }).join("");
+    return series.map((s,si)=>{ const v=s.values[ci]; if(v==null) return ''; const x=gx+si*barW,y=yAt(v),h=Math.abs(y-zero),top=Math.min(y,zero), cx=x+(barW-1.5)/2, ly=top-4;
+      // value label drawn vertically (reads bottom→top) just above the bar
+      const lbl=`<text class="axt bval" x="${cx.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="start" transform="rotate(-90 ${cx.toFixed(1)} ${ly.toFixed(1)})">${mktComma(v)}</text>`;
+      return `<rect x="${x.toFixed(1)}" y="${top.toFixed(1)}" width="${Math.max(3,barW-1.5).toFixed(1)}" height="${Math.max(0,h).toFixed(1)}" rx="1.5" fill="${s.color}"/>${lbl}`; }).join(""); }).join("");
+  const xlab=categories.map((cat,ci)=>{ const cx=pl+groupW*ci+groupW/2; return `<text class="axt xw" x="${cx.toFixed(1)}" y="${H-20}" text-anchor="middle">${esc(cat)}</text>`; }).join("");
+  const xaxisTitle=`<text class="axt" x="${(pl+iw/2).toFixed(1)}" y="${H-4}" text-anchor="middle" style="font-weight:600">Week Ending</text>`;
   const legend=`<div class="mkt-legend">${series.map(s=>`<span><i style="background:${s.color}"></i>${esc(s.label)}</span>`).join("")}</div>`;
-  return `<div class="mkt-chart"><h3>${esc(title)}</h3><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${grid}${bars}${xlab}</svg>${legend}</div>`;
+  const showXTitle = /Week Ending/i.test(title);
+  return `<div class="mkt-chart"><h3>${esc(title)}</h3><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${grid}${bars}${xlab}${showXTitle?xaxisTitle:''}</svg>${legend}</div>`;
 }
 /* Per-platform grouped data: one series per account, values across week endings
    (mode='week') or months (mode='month'). */
@@ -2194,8 +2203,10 @@ function mktReportDoc(notes){
     .mkt-chart{border:1px solid #eaeaea;border-radius:8px;padding:10px;break-inside:avoid}
     .mkt-chart h3{font-size:12px;margin:0 0 8px;font-weight:700} .mkt-chart svg{width:100%;height:auto}
     .mkt-chart .empty{color:#999;padding:20px 0;text-align:center}
-    .gl{stroke:#ececec;stroke-width:1} .axt{fill:#666;font-size:9px}
-    .mkt-legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px;font-size:10px;color:#555} .mkt-legend span{display:inline-flex;align-items:center;gap:5px} .mkt-legend i{width:9px;height:9px;border-radius:2px;display:inline-block}
+    .gl{stroke:#ececec;stroke-width:1} .axt{fill:#555;font-size:9px}
+    .axt.bval{fill:#12141a;font-size:8.5px;font-weight:700} .axt.xw{fill:#555;font-size:9.5px;font-weight:600}
+    .mkt-legend{display:flex;flex-wrap:wrap;gap:7px 14px;margin-top:10px;font-size:11px;color:#222;background:#fafafa;border:1px solid #eaeaea;border-radius:8px;padding:8px 10px}
+    .mkt-legend span{display:inline-flex;align-items:center;gap:6px;font-weight:600} .mkt-legend i{width:12px;height:12px;border-radius:3px;display:inline-block;flex:0 0 auto}
     .rsub{font-size:13px;font-weight:700;margin:16px 0 6px}
     .rcards{display:flex;flex-wrap:wrap;gap:10px;margin:6px 0} .rcard{border:1px solid #eaeaea;border-radius:8px;padding:9px 13px;min-width:150px}
     .rcard .l{font-size:10px;color:#777;text-transform:uppercase;letter-spacing:.03em} .rcard .v{font-size:17px;font-weight:800;margin-top:2px}
