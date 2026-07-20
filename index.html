@@ -419,6 +419,7 @@
   .rpt h1{font-size:22px;margin:0 0 4px}
   .rpt h2{font-size:15px;margin:22px 0 10px;border-bottom:1px solid var(--border);padding-bottom:6px}
   .rmeta{color:var(--muted);font-size:12px;margin-bottom:14px}
+  .rsub{font-size:13px;font-weight:700;margin:16px 0 6px}
   .rcards{display:flex;flex-wrap:wrap;gap:10px;margin:6px 0 4px}
   .rcard{border:1px solid var(--border);border-radius:10px;padding:10px 14px;min-width:160px;background:var(--bg)}
   .rcard .l{font-size:10px;color:var(--muted2);text-transform:uppercase;letter-spacing:.03em}
@@ -564,8 +565,7 @@ const MKT_NUM_FIELDS = [
 const MKT_TABS = [
   {k:"dashboard",   l:"Marketing Dashboard"},
   {k:"followers",   l:"Followers Table"},
-  {k:"views",       l:"Views Table"},
-  {k:"sdash",       l:"Social Followers & Views Dashboard"},
+  {k:"sdash",       l:"Followers / Subscribers Dashboard"},
   {k:"mom",         l:"Month-over-Month"},
   {k:"export",      l:"Export Report"},
   {k:"calendar",    l:"Content Calendar"},
@@ -1824,14 +1824,15 @@ function viewMarketing(){
     return `<div class="page-head"><div><h1>Marketing Operations</h1><div class="sub">Loading…</div></div></div>
       <div class="card sect"><div class="empty">Loading marketing data…</div></div>`;
   }
+  // Reports focus on Followers/Subscribers only (Views is hidden for now — its
+  // data stays in Supabase). Metric is forced to followers; the toggle is gone.
+  state.mkt.metric="followers";
   const tab=MKT_TABS.some(t=>t.k===m.tab)?m.tab:"dashboard";
   const subnav=MKT_TABS.map(t=>`<div class="t ${tab===t.k?'active':''}" data-mkttab="${t.k}">${esc(t.l)}</div>`).join("");
   const modeTag=state.mode==='live'?'<span class="mkt-tag live">Supabase · shared</span>':'<span class="mkt-tag demo">Local / demo data</span>';
-  const metricTabs=["sdash","mom"];
   const body = tab==="dashboard"?mktTabTaskDashboard()
     : tab==="sdash"?mktTabSocialDash()
     : tab==="followers"?mktTabEditable("followers")
-    : tab==="views"?mktTabEditable("views")
     : tab==="mom"?mktTabMoM()
     : tab==="export"?mktTabExport()
     : tab==="calendar"?mktTabCalendar()
@@ -1844,13 +1845,8 @@ function viewMarketing(){
       <div class="sub">Performance · Content · Tasks — manual-entry · ${modeTag}</div></div>
     </div>
     <div class="mkt-subnav">${subnav}</div>
-    ${metricTabs.includes(tab)?mktMetricToggle():''}
     ${tab!=="settings"&&tab!=="dashboard"?mktFilterBar(tab):''}
     ${body}`;
-}
-function mktMetricToggle(){
-  return `<div class="mkt-metrictoggle">${MKT_METRIC_OPTS.map(o=>
-    `<button class="seg ${state.mkt.metric===o.k?'on':''}" data-mktmetric="${o.k}" ${state.mkt.metric===o.k?`style="background:${o.color}"`:''}>${o.icon} ${esc(o.l)}</button>`).join("")}</div>`;
 }
 function mktFilterBar(tab){
   const f=state.mkt.filt, accounts=mktAccounts();
@@ -1921,7 +1917,7 @@ function mktPlatformWeekSeries(ents, metric){
    Metric toggle picks Followers OR Views. KPIs + a WoW trend line per platform,
    then ONE grouped comparison per platform (all that platform's accounts together). */
 function mktTabSocialDash(){
-  const ents=mktFiltered(); if(!ents.length) return mktEmpty("No followers/views data yet. Enter numbers in the Followers Table / Views Table — they feed this dashboard automatically.");
+  const ents=mktFiltered(); if(!ents.length) return mktEmpty("No follower/subscriber data yet. Enter numbers in the Followers Table — they feed this dashboard automatically.");
   const M=mktMetricMeta(), metric=M.k, noun=metric==='followers'?'Followers/Subs':'Views';
   const lat=mktLatestWithMetric(ents, metric);
   const calc=lat.map(e=>({name:e.account_name,brand:e.brand,platform:e.platform,m:mktMetric(e,metric)}));
@@ -2104,59 +2100,82 @@ function mktMonthTotalSeries(ents, metric){
     const am=byMonth.get(mk),k=mktAcctKey(e),cur=am.get(k); if(!cur||e.entry_date>=cur.entry_date) am.set(k,e); });
   return [...byMonth.keys()].sort().map(mk=>({label:mktMonthShort(mk), value:[...byMonth.get(mk).values()].reduce((s,e)=>s+mktN(e[metric]),0)}));
 }
-/* The full report body (shared by the on-screen preview and the print doc). */
+/* Grouped bar chart: x-axis categories (week endings/months), one bar series
+   per account, so accounts stay separate within a platform (never combined). */
+function mktGroupedBarChart(title, categories, series){
+  const W=560,H=250,pl=46,pr=12,pt=12,pb=52, iw=W-pl-pr, ih=H-pt-pb;
+  const all=series.flatMap(s=>s.values.filter(v=>v!=null));
+  if(!categories.length||!series.length||!all.length) return `<div class="mkt-chart"><h3>${esc(title)}</h3><div class="empty" style="padding:24px 0">No data.</div></div>`;
+  const maxY=Math.max(1,...all), minY=Math.min(0,...all);
+  const nC=categories.length, groupW=iw/nC, nS=series.length, barW=Math.max(3,Math.min(24,(groupW*0.78)/nS));
+  const yAt=v=>pt+ih-((v-minY)/((maxY-minY)||1))*ih, zero=yAt(0);
+  const grid=[0,.25,.5,.75,1].map(t=>{const v=minY+t*(maxY-minY),y=yAt(v);return `<line class="gl" x1="${pl}" y1="${y.toFixed(1)}" x2="${W-pr}" y2="${y.toFixed(1)}"/><text class="axt" x="${pl-6}" y="${(y+3).toFixed(1)}" text-anchor="end">${mktFmt(v)}</text>`;}).join("");
+  const bars=categories.map((cat,ci)=>{ const gx=pl+groupW*ci+(groupW-barW*nS)/2;
+    return series.map((s,si)=>{ const v=s.values[ci]; if(v==null) return ''; const x=gx+si*barW,y=yAt(v),h=Math.abs(y-zero),top=Math.min(y,zero);
+      return `<rect x="${x.toFixed(1)}" y="${top.toFixed(1)}" width="${Math.max(2,barW-1.5).toFixed(1)}" height="${Math.max(0,h).toFixed(1)}" rx="1.5" fill="${s.color}"/>`; }).join(""); }).join("");
+  const xlab=categories.map((cat,ci)=>{ const cx=pl+groupW*ci+groupW/2; return `<text class="axt" x="${cx.toFixed(1)}" y="${H-30}" text-anchor="middle">${esc(cat)}</text>`; }).join("");
+  const legend=`<div class="mkt-legend">${series.map(s=>`<span><i style="background:${s.color}"></i>${esc(s.label)}</span>`).join("")}</div>`;
+  return `<div class="mkt-chart"><h3>${esc(title)}</h3><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${grid}${bars}${xlab}</svg>${legend}</div>`;
+}
+/* Per-platform grouped data: one series per account, values across week endings
+   (mode='week') or months (mode='month'). */
+function mktPlatformGrouped(ents, platform, metric, mode){
+  const pe=ents.filter(e=>e.platform===platform); if(!pe.length) return null;
+  const keyFn = mode==='week' ? (e=>mktWeekKey(e.entry_date)) : (e=>mktMonthKey(e.entry_date));
+  const labelFn = mode==='week' ? mktWeekEndShort : mktMonthShort;
+  const keys=[...new Set(pe.map(keyFn).filter(Boolean))].sort();
+  const accounts=[...new Set(pe.map(e=>e.account_name))].sort();
+  const categories=keys.map(labelFn);
+  const series=accounts.map((name,i)=>({label:name, color:MKT_PAL[i%MKT_PAL.length],
+    values:keys.map(k=>{ const inK=pe.filter(e=>e.account_name===name && keyFn(e)===k && e[metric]!=null).sort((a,b)=>a.entry_date.localeCompare(b.entry_date));
+      return inK.length? inK[inK.length-1][metric] : null; })}));
+  return {categories, series};
+}
+/* The full report body (Followers/Subscribers only — Views is hidden for now).
+   Shared by the on-screen preview and the printable doc. */
 function mktReportHTML(notes){
   const ents=mktFiltered();
   const range=mktReportRange(ents);
   const weeks=[...new Set(ents.map(e=>mktWeekKey(e.entry_date)).filter(Boolean))].sort();
   const weekEnding=weeks.length?mktWeekEndLabel(weeks[weeks.length-1]):'—';
-  const fol=mktAccountCurrent(ents,'followers'), vw=mktAccountCurrent(ents,'views');
+  const fol=mktAccountCurrent(ents,'followers');
   const sum=(arr,fn)=>arr.reduce((s,c)=>s+(fn(c)||0),0);
-  const totFol=sum(fol,c=>mktN(c.m.cur)), totFolChg=sum(fol,c=>c.m.wowChange);
-  const totVw=sum(vw,c=>mktN(c.m.cur)), totVwChg=sum(vw,c=>c.m.wowChange);
+  const totFol=sum(fol,c=>mktN(c.m.cur)), totFolChg=sum(fol,c=>c.m.wowChange), totFolMoM=sum(fol,c=>c.m.momChange);
   const folRk=fol.filter(c=>c.m.wowGrowth!=null).sort((a,b)=>b.m.wowGrowth-a.m.wowGrowth);
   const hi=folRk[0], lo=folRk[folRk.length-1];
-  const hiViews=vw.slice().sort((a,b)=>mktN(b.m.cur)-mktN(a.m.cur))[0];
   const card=(l,v)=>`<div class="rcard"><div class="l">${l}</div><div class="v">${v}</div></div>`;
-  const wkTable=(arr,kind)=>{ const rows=arr.map(c=>`<tr><td>${esc(c.name)}</td><td>${esc(c.platform)}</td>
-      <td class="num">${mktComma(c.m.cur)}</td><td class="num">${mktComma(kind==='wow'?c.m.prevWeek:c.m.prevMonth)}</td>
+  const platforms=mktScopePlatforms();
+  const platTable=(p,kind)=>{ const arr=fol.filter(c=>c.platform===p); if(!arr.length) return '';
+    const rows=arr.map(c=>`<tr><td>${esc(c.name)}</td><td class="num">${mktComma(c.m.cur)}</td><td class="num">${mktComma(kind==='wow'?c.m.prevWeek:c.m.prevMonth)}</td>
       <td class="num">${mktSigned(kind==='wow'?c.m.wowChange:c.m.momChange)}</td><td class="num">${mktPct(kind==='wow'?c.m.wowGrowth:c.m.momGrowth)}</td></tr>`).join("");
     const h=kind==='wow'?['Current','Prev Week','WoW Δ','WoW %']:['Current','Prev Month','MoM Δ','MoM %'];
-    return `<table class="mkt-tbl"><thead><tr><th>Account</th><th>Platform</th><th class="num">${h[0]}</th><th class="num">${h[1]}</th><th class="num">${h[2]}</th><th class="num">${h[3]}</th></tr></thead><tbody>${rows||'<tr><td colspan="6">No data.</td></tr>'}</tbody></table>`; };
-  const wowBars=arr=>arr.map(c=>({label:c.name,value:c.m.wowChange,color:c.m.wowChange>=0?'#3ec98a':'#ff5a5a'}));
-  const momBars=arr=>arr.map(c=>({label:c.name,value:c.m.momChange,color:c.m.momChange>=0?'#3ec98a':'#ff5a5a'}));
+    return `<table class="mkt-tbl"><thead><tr><th>Account</th><th class="num">${h[0]}</th><th class="num">${h[1]}</th><th class="num">${h[2]}</th><th class="num">${h[3]}</th></tr></thead><tbody>${rows}</tbody></table>`; };
+  const section=(mode)=>platforms.map(p=>{ const g=mktPlatformGrouped(ents,p,'followers',mode); if(!g||!g.series.length) return '';
+    const title=p+(mode==='week'?" — Followers by Week Ending (per account)":" — Followers by Month (per account)");
+    return `<h3 class="rsub">${MKT_PLATFORM_ICON[p]||''} ${esc(p)}</h3>
+      <div class="mkt-charts" style="grid-template-columns:1fr">${mktGroupedBarChart(title,g.categories,g.series)}</div>
+      ${platTable(p, mode==='week'?'wow':'mom')}`; }).filter(Boolean).join("");
+  const weeklyPlat=section('week'), monthlyPlat=section('month');
   return `<div class="rpt">
-    <h1>Marketing Performance Report</h1>
+    <h1>Marketing Performance Report — Followers / Subscribers</h1>
     <div class="rmeta">Date range: <b>${esc(range)}</b> &nbsp;·&nbsp; Week ending: <b>${esc(weekEnding)}</b> &nbsp;·&nbsp; Generated ${esc(new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}))}</div>
 
     <h2>1 · Summary</h2>
     <div class="rcards">
-      ${card("Total Followers/Subs",mktComma(totFol))}
-      ${card("Total Follower Change (WoW)",mktSigned(totFolChg))}
-      ${card("Total Views",mktComma(totVw))}
-      ${card("Total Views Change (WoW)",mktSigned(totVwChg))}
+      ${card("Total Followers/Subscribers",mktComma(totFol))}
+      ${card("Total WoW Change",mktSigned(totFolChg))}
+      ${card("Total MoM Change",mktSigned(totFolMoM))}
       ${card("Highest Growth Account",hi?esc(hi.name)+' ('+mktPct(hi.m.wowGrowth)+')':'—')}
       ${card("Lowest Growth Account",lo?esc(lo.name)+' ('+mktPct(lo.m.wowGrowth)+')':'—')}
-      ${card("Highest Views Account",hiViews?esc(hiViews.name)+' ('+mktComma(hiViews.m.cur)+')':'—')}
     </div>
 
-    <h2>2 · Weekly Followers Comparison</h2>
-    <div class="mkt-charts">${mktBarChart("Total Followers by Week Ending",mktWeekEndingSeries(ents,'followers'))}${mktBarChart("Follower WoW Change by Account — wk ending "+weekEnding,wowBars(fol))}</div>
-    ${wkTable(fol,'wow')}
+    <h2>2 · Weekly Followers Comparison (by platform · x-axis = Week Ending)</h2>
+    ${weeklyPlat||'<div class="empty">No weekly follower data in range.</div>'}
 
-    <h2>3 · Weekly Views Comparison</h2>
-    <div class="mkt-charts">${mktBarChart("Total Views by Week Ending",mktWeekEndingSeries(ents,'views'))}${mktBarChart("Views WoW Change by Account — wk ending "+weekEnding,wowBars(vw))}</div>
-    ${wkTable(vw,'wow')}
+    <h2>3 · Monthly Followers Comparison (by platform)</h2>
+    ${monthlyPlat||'<div class="empty">No monthly follower data in range.</div>'}
 
-    <h2>4 · Monthly Followers Comparison</h2>
-    <div class="mkt-charts">${mktBarChart("Total Followers by Month",mktMonthTotalSeries(ents,'followers'))}${mktBarChart("Follower MoM Change by Account",momBars(fol))}</div>
-    ${wkTable(fol,'mom')}
-
-    <h2>5 · Monthly Views Comparison</h2>
-    <div class="mkt-charts">${mktBarChart("Total Views by Month",mktMonthTotalSeries(ents,'views'))}${mktBarChart("Views MoM Change by Account",momBars(vw))}</div>
-    ${wkTable(vw,'mom')}
-
-    <h2>6 · Notes</h2>
+    <h2>4 · Notes</h2>
     <div class="rnotes">${notes?esc(notes):'<span style="color:var(--muted2)">No notes added.</span>'}</div>
   </div>`;
 }
@@ -2176,6 +2195,8 @@ function mktReportDoc(notes){
     .mkt-chart h3{font-size:12px;margin:0 0 8px;font-weight:700} .mkt-chart svg{width:100%;height:auto}
     .mkt-chart .empty{color:#999;padding:20px 0;text-align:center}
     .gl{stroke:#ececec;stroke-width:1} .axt{fill:#666;font-size:9px}
+    .mkt-legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px;font-size:10px;color:#555} .mkt-legend span{display:inline-flex;align-items:center;gap:5px} .mkt-legend i{width:9px;height:9px;border-radius:2px;display:inline-block}
+    .rsub{font-size:13px;font-weight:700;margin:16px 0 6px}
     .rcards{display:flex;flex-wrap:wrap;gap:10px;margin:6px 0} .rcard{border:1px solid #eaeaea;border-radius:8px;padding:9px 13px;min-width:150px}
     .rcard .l{font-size:10px;color:#777;text-transform:uppercase;letter-spacing:.03em} .rcard .v{font-size:17px;font-weight:800;margin-top:2px}
     .rnotes{white-space:pre-wrap;border:1px solid #eaeaea;border-radius:8px;padding:10px;min-height:36px}
@@ -2197,10 +2218,10 @@ function mktDownloadReportCSV(){
   const months=[...new Set(ents.map(e=>mktMonthKey(e.entry_date)).filter(Boolean))].sort();
   const moLbl=months.length?mktMonthLabel(months[months.length-1]):"";
   const rows=[["Section","Metric","Account","Brand","Platform","Period","Current","Previous","Change","GrowthPct"]];
-  ["followers","views"].forEach(metric=>{ mktAccountCurrent(ents,metric).forEach(c=>{
-    rows.push(["Weekly",metric,c.name,c.brand,c.platform,"Week ending "+wkEnd,c.m.cur,c.m.prevWeek,c.m.wowChange,c.m.wowGrowth!=null?c.m.wowGrowth.toFixed(1):""]);
-    rows.push(["Monthly",metric,c.name,c.brand,c.platform,moLbl,c.m.cur,c.m.prevMonth,c.m.momChange,c.m.momGrowth!=null?c.m.momGrowth.toFixed(1):""]);
-  }); });
+  mktAccountCurrent(ents,'followers').forEach(c=>{   // Followers/Subscribers only
+    rows.push(["Weekly","Followers",c.name,c.brand,c.platform,"Week ending "+wkEnd,c.m.cur,c.m.prevWeek,c.m.wowChange,c.m.wowGrowth!=null?c.m.wowGrowth.toFixed(1):""]);
+    rows.push(["Monthly","Followers",c.name,c.brand,c.platform,moLbl,c.m.cur,c.m.prevMonth,c.m.momChange,c.m.momGrowth!=null?c.m.momGrowth.toFixed(1):""]);
+  });
   const csv=rows.map(r=>r.map(csvCell).join(",")).join("\n");
   const blob=new Blob([csv],{type:"text/csv"}); const url=URL.createObjectURL(blob);
   const a=document.createElement("a"); a.href=url; a.download="marketing-report.csv"; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
@@ -2215,7 +2236,7 @@ function mktTabExport(){
     </div>
     <div class="card sect" style="margin-bottom:14px"><h2 style="margin:0 0 8px">Report Notes (optional)</h2>
       <textarea id="mktReportNotes" style="width:100%;min-height:64px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:9px;padding:10px;font-size:13px" placeholder="Short summary to include on the report for Rob…">${esc(notes)}</textarea></div>
-    <div class="card sect">${ents.length?mktReportHTML(notes):`<div class="empty">No data in the current filter. Enter followers/views in the tables first.</div>`}</div>`;
+    <div class="card sect">${ents.length?mktReportHTML(notes):`<div class="empty">No data in the current filter. Enter followers/subscribers in the Followers Table first.</div>`}</div>`;
 }
 
 /* ---- Content Calendar ---- */
@@ -3394,17 +3415,16 @@ function renderImportModal(){
 
    d) MARKETING OPERATIONS (expanded). The Marketing nav item is now the
       marketing team's operating area, with sub-tabs: Marketing Dashboard,
-      Followers Table, Views Table, Social Followers & Views Dashboard,
-      Month-over-Month, Export Report, Content Calendar, Marketing Tasks,
-      Scheduled Content, Completed Marketing Tasks, Settings. Followers/Views are
-      edited in their tables and feed ONE Social dashboard (WoW + platform-
-      grouped graphs), a Month-over-Month tab (editable month-end table + MoM
-      report), and an Export Report tab (printable → Save-as-PDF + CSV; weekly
-      by Week Ending/Sunday and monthly comparisons, both metrics). Export uses
-      the same filtered data as the dashboard — client-side only, no SQL/Vercel
-      changes.
-      - Only TWO performance metrics: Followers/Subscribers and Views (metric
-        toggle). Followers/Views tables are DIRECTLY EDITABLE per account, by
+      Followers Table, Followers/Subscribers Dashboard, Month-over-Month,
+      Export Report, Content Calendar, Marketing Tasks, Scheduled Content,
+      Completed Marketing Tasks, Settings. Reports focus on FOLLOWERS/SUBSCRIBERS
+      only — Views is hidden (its data stays in marketing_entries.views, never
+      deleted, just not shown). The Followers Table is directly editable per
+      account; WoW (Mon–Sun, labeled by Week Ending/Sunday) and MoM auto-calc.
+      Export Report is printable (Save-as-PDF) + CSV with per-platform grouped
+      bar graphs (accounts stay separate). Client-side only, no SQL/Vercel change.
+      - Performance metric shown: Followers/Subscribers only (Views hidden).
+        The Followers table is DIRECTLY EDITABLE per account, by
         week; WoW (Mon–Sun) and MoM (calendar month) are auto-calculated. Data
         lives in `marketing_entries` (no new columns). Old rows may still hold
         reach/likes/etc — preserved but hidden.
