@@ -619,6 +619,7 @@ const state = {
     supabaseAnon: DEFAULT_SUPABASE_ANON,
     emailEndpoint: "/api/send-email",
     reminderLeadMin: 120,
+    notificationsEnabled: false,
     team: DEFAULT_TEAM.slice()
   },
   user: "",
@@ -728,7 +729,7 @@ async function loadTasks(){
       // Note: emailEndpoint is intentionally NOT loaded — the endpoint is a fixed
       // code constant (EMAIL_ENDPOINT). Older saved settings may contain a stale
       // value (e.g. /api/notify); ignoring it prevents calling a dead endpoint.
-      ["reminderLeadMin","team"].forEach(k=>{
+      ["reminderLeadMin","team","notificationsEnabled"].forEach(k=>{
         if(cfgRow.data[k]!=null) state.cfg[k]=cfgRow.data[k];
       });
       MANAGERS.forEach(mn=>{ if(!state.cfg.team.some(m=>m.name===mn)) state.cfg.team.push({name:mn, department:"Managers", role:"Manager", email:"", phone:""}); });
@@ -784,6 +785,7 @@ async function deleteTaskRemote(id){
 async function persistSharedSettings(){
   const shared = {
     reminderLeadMin: state.cfg.reminderLeadMin,
+    notificationsEnabled: state.cfg.notificationsEnabled,
     team: state.cfg.team
   };
   if(state.mode==="live" && state.sb){
@@ -845,6 +847,7 @@ function ensureNotif(t){
 }
 
 async function notifyAssigned(t, reason){
+  if(!state.cfg.notificationsEnabled) return;
   const n = ensureNotif(t);
   if(!t.owner) return;
   if(reason==="created" && n.assigned) return;
@@ -855,6 +858,7 @@ async function notifyAssigned(t, reason){
 
 /* Email the manager once when a task enters "For Approval". */
 async function notifyApproval(t){
+  if(!state.cfg.notificationsEnabled) return;
   const n = ensureNotif(t);
   if(t.status!=="For Approval" || n.approval) return;
   n.approval = true;                 // mark once; do not retry on failure
@@ -867,6 +871,7 @@ async function notifyApproval(t){
    5xx never causes the 60s scan to retry the same task again and again. */
 let _scanning = false;
 async function notificationScan(){
+  if(!state.cfg.notificationsEnabled) return;
   if(_scanning) return; _scanning = true;        // never overlap scans
   try{
     const lead = (state.cfg.reminderLeadMin||120) * 60000;
@@ -2638,9 +2643,10 @@ function viewSettings(){
   </div>
   <div class="card sect" style="margin-bottom:16px">
     <h2>📧 Email Notifications</h2>
-    <div class="sub" style="margin-bottom:12px">Emails the <b>owner</b> when a task is assigned, the <b>owner + cc manager</b> when a task is due soon (2 hours before, by default) and when overdue, and the <b>manager</b> when a task is marked <b>For Approval</b>. Repeat sends are prevented (tracked inside each task's data). Addresses come from the Team Directory below.</div>
+    <div class="sub" style="margin-bottom:12px">When enabled, emails the <b>owner</b> when a task is assigned, the <b>owner + cc manager</b> when a task is due soon (2 hours before, by default) and when overdue, and the <b>manager</b> when a task is marked <b>For Approval</b>. Repeat sends are prevented (tracked inside each task's data). Addresses come from the Team Directory below.</div>
     <div class="hint" style="margin-bottom:12px">📨 Sending is handled by the serverless function <code class="k">/api/send-email</code>, which holds the email-provider key (e.g. Resend) as a Vercel env var <code class="k">RESEND_API_KEY</code>. No API key is stored in this page. See the README for the function code and setup.</div>
     <div class="form-grid">
+      <div class="fld"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="gcEnabled" ${state.cfg.notificationsEnabled?'checked':''}/> Enable task alerts</label></div>
       <div class="fld"><label>Due-soon reminder timing</label><select id="gcLead">${r}</select></div>
     </div>
     <div style="margin-top:12px"><button class="btn primary" id="saveGc">Save notifications</button> <button class="btn" id="testGc">Send test email</button></div>
@@ -2664,6 +2670,7 @@ function bindSettings(c){
   $("#saveGc").onclick=async()=>{
     if(!requireAdmin()) return;
     state.cfg.reminderLeadMin=parseInt($("#gcLead").value,10)||120;
+    state.cfg.notificationsEnabled=$("#gcEnabled").checked;
     saveConfig(); await persistSharedSettings(); toast("Notification settings saved");
   };
   $("#testGc").onclick=async()=>{

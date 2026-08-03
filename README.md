@@ -33,6 +33,11 @@ You can also paste the Project URL + anon key in **Settings**, or set
 `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY`. The service role key is never used.
 
 ## Email notifications (Resend serverless function)
+Task alerts are **off by default**. Turn them on in the app under **Settings →
+Email Notifications → Enable task alerts** (shared setting `notificationsEnabled`);
+both the in-app 60s scan and `api/cron-reminders.js` check this flag and send
+nothing while it's off.
+
 Emails are sent by the serverless function **`api/send-email.js`** (shared helper
 `lib/email.js`) using **Resend**. The browser never holds an API key — it POSTs the
 recipients + task fields to `/api/send-email`, which sends the message. Triggers:
