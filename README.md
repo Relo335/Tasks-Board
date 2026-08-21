@@ -43,7 +43,12 @@ create the table (the app falls back to localStorage if it's missing).
 rather than duplicating it. Status stays `Scheduled` and owner is blank for the
 team to fill in.
 
-Calendar rows are colour-coded by brand, using the same palette as the workbook:
+The tab opens on a **month grid** — a real calendar, one coloured pill per post
+showing its time and title. Click a post to open it, or an empty day to add one
+on that date; use **Prev / Next / Today** to move between months. The **List**
+toggle switches back to the sortable table with all columns. On a phone the grid
+becomes a stacked day list. Posts are colour-coded by brand, using the same
+palette as the workbook:
 
 | Brand | Colour |
 |---|---|
