@@ -46,10 +46,22 @@ team to fill in.
 **`marketing-content-cycles.sql`** then repeats that plan forward so the calendar
 runs continuously — after post 20 it cycles back to post 1. The plan is exactly
 28 days long, so shifting it by multiples of 28 puts every post back on the same
-weekday *and* the same time slot; that is why the weekday written in each note
-stays correct. Twelve extra cycles takes it to **780 posts, Aug 24 2026 – Aug 22
-2027**, with content on every single day. Change the `12` in its `generate_series`
-to extend or shorten that.
+weekday *and* the same time slot, which keeps each brand's day, time and content
+type exactly as the sheet specifies (and keeps the weekday written in each note
+correct).
+
+It is currently set to **2 extra cycles: 180 posts, Aug 24 – Nov 15 2026**, about
+three months, with content on every single day. That is deliberately short — long
+enough to judge whether repeating the sheet's schedule actually performs, short
+enough to change course cheaply. Raise the bound in its `generate_series` and
+re-run to extend:
+
+| bound | through | posts |
+|---|---|---|
+| `2` | Nov 15 2026 | 180 |
+| `3` | Dec 13 2026 | 240 |
+| `5` | Feb 7 2027 | 360 |
+| `12` | Aug 22 2027 | 780 (one year) |
 
 It only ever inserts (`on conflict do nothing`), so re-running is safe: a post
 your team has edited, attached a file to, or marked Posted is never overwritten.

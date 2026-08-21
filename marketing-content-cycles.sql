@@ -5,9 +5,16 @@
 -- weekday AND the same time slot. That is why the weekday written into each
 -- note stays correct across cycles. After post 20 the cycle returns to post 1.
 --
--- Cycle 1 is the seeded plan (marketing-content-seed.sql); this adds cycles
--- 2 through 13, carrying the calendar through Sun 2027-08-22 (one year).
--- To go further or shorter, change the 12 in generate_series below.
+-- Cycle 1 is the seeded plan (marketing-content-seed.sql); this adds cycles 2
+-- and 3, carrying the calendar through Sun 2026-11-15 — 84 days, i.e. three
+-- full cycles, the closest clean boundary to three months. Deliberately short:
+-- the point is to see whether repeating the sheet's schedule actually performs
+-- before committing a year to it.
+--
+-- To extend, raise the 2 in generate_series below and re-run. Each extra cycle
+-- is 28 more days and 60 more posts:
+--   2 -> Nov 15 2026 (180 posts)    5 -> Feb  7 2027 (360 posts)
+--   3 -> Dec 13 2026 (240 posts)   12 -> Aug 22 2027 (780 posts, one year)
 --
 -- Run AFTER marketing-content-seed.sql, in Supabase -> SQL Editor.
 -- Safe to re-run in any order and any number of times:
@@ -28,7 +35,7 @@ select
   b.publish_date + k * 28,
   b.publish_time
 from public.marketing_content b
-cross join generate_series(1, 12) as k
+cross join generate_series(1, 2) as k
 where b.id like 'mc\_%'
   and b.publish_date between date '2026-08-24' and date '2026-09-20'
 on conflict (id) do nothing;

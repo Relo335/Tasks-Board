@@ -3618,10 +3618,13 @@ function renderImportModal(){
         marketing-content-cycles.sql then repeats that plan forward: the plan is
         exactly 28 days, so shifting by multiples of 28 keeps every post on the
         same weekday AND time slot (which is why the weekday in each note stays
-        true). After post 20 the cycle returns to post 1. 12 extra cycles = 780
-        posts through Aug 22 2027, one every day. It inserts only, never
-        updates, so a post the team has edited or marked Posted is never
-        clobbered; a post they DELETED does come back on a re-run.
+        true), and keeps each brand's day/time/content-type exactly as the sheet
+        specifies. After post 20 the cycle returns to post 1. Currently set to 2
+        extra cycles = 180 posts through Nov 15 2026 (~3 months) — deliberately
+        short, to test whether repeating the schedule performs before committing
+        further. Raise the generate_series bound and re-run to extend. It inserts
+        only, never updates, so a post the team has edited or marked Posted is
+        never clobbered; a post they DELETED does come back on a re-run.
         The tab renders a real month grid by default (mktContentMonth), with a
         Calendar/List toggle; the old table is still there under List. Posts are
         placed by publish_date, coloured by brand, and clicking one opens it —
