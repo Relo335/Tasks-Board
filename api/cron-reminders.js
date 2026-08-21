@@ -3,6 +3,9 @@
 // Server-side notification scan. Runs on a schedule (Vercel Cron or any external
 // cron) so emails fire even when nobody has the task board open in a browser.
 //
+// Skipped entirely unless the app's Settings -> Email Notifications -> "Enable
+// task alerts" toggle is on (shared setting `notificationsEnabled`, off by default).
+//
 // It reads tasks from Supabase (anon key — service role is NOT used) and emails
 // via Resend (lib/email.js):
 //   - Assigned        -> owner            (if not already sent)
@@ -100,6 +103,10 @@ export default async function handler(req, res) {
 
     const settingsRow = rows.find((r) => r.id === "__settings__");
     const settings = (settingsRow && settingsRow.data) || {};
+    if (settings.notificationsEnabled !== true) {
+      res.status(200).json({ ok: true, skipped: true, reason: "Task alerts are disabled in Settings" });
+      return;
+    }
     const team = settings.team || [];
     const emailFor = (name, stamped) => {
       if (stamped) return stamped;

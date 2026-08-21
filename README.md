@@ -32,7 +32,37 @@ create the table (if needed) is in the comment at the bottom of `index.html`.
 You can also paste the Project URL + anon key in **Settings**, or set
 `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY`. The service role key is never used.
 
+## Marketing content calendar
+Content items live in `marketing_content` — run **`marketing-content.sql`** once to
+create the table (the app falls back to localStorage if it's missing).
+
+**`marketing-content-seed.sql`** loads the 4-week posting plan built from
+`Relocators_NobodyMove_SistersInCharge_Calendar.xlsx`: **60 posts, Aug 24 – Sep 20
+2026, 20 per brand**, each with its scheduled date and time. Run it after
+`marketing-content.sql`; it upserts on `id`, so re-running refreshes the plan
+rather than duplicating it. Status stays `Scheduled` and owner is blank for the
+team to fill in.
+
+Calendar rows are colour-coded by brand, using the same palette as the workbook:
+
+| Brand | Colour |
+|---|---|
+| Relocators | `#1F5C9E` blue |
+| Nobody Move | `#7A2E4A` wine |
+| Sisters in Charge | `#0F6E56` green |
+
+Because the same post goes to Facebook and Instagram at the same time, each one is
+a **single** item with platform `Facebook + Instagram` rather than two rows. Those
+items still show up when you filter by either Facebook or Instagram. The
+performance side (`marketing_entries`, accounts, charts) is unchanged and continues
+to report per individual platform.
+
 ## Email notifications (Resend serverless function)
+Task alerts are **off by default**. Turn them on in the app under **Settings →
+Email Notifications → Enable task alerts** (shared setting `notificationsEnabled`);
+both the in-app 60s scan and `api/cron-reminders.js` check this flag and send
+nothing while it's off.
+
 Emails are sent by the serverless function **`api/send-email.js`** (shared helper
 `lib/email.js`) using **Resend**. The browser never holds an API key — it POSTs the
 recipients + task fields to `/api/send-email`, which sends the message. Triggers:

@@ -383,6 +383,8 @@
   table.mkt-tbl td{padding:8px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
   table.mkt-tbl tr:hover td{background:rgba(255,255,255,.02)}
   table.mkt-tbl .num{text-align:right;font-variant-numeric:tabular-nums}
+  table.mkt-tbl tr[data-brand-bar] td:first-child{box-shadow:inset 3px 0 0 var(--bc)}
+  .brand-chip{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;white-space:nowrap}
   .mkt-chart{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px}
   .mkt-chart h3{margin:0 0 10px;font-size:13px;font-weight:700}
   .mkt-chart svg{display:block;width:100%;height:auto;overflow:visible}
@@ -545,7 +547,25 @@ const MKT_DEFAULT_ACCOUNTS = [
   {brand:"Nobody Move",      platform:"YouTube",  name:"Nobody Move YouTube"},
   {brand:"Robert Personal",  platform:"LinkedIn", name:"Robert Personal LinkedIn"}
 ];
+/* Brand colours, taken from the posting-calendar workbook so the board matches
+   the spreadsheet the team already reads. `bar` is the header fill used on each
+   brand's tab; `tint` is that tab's light row fill. Brands without a colour fall
+   back to a neutral chip. */
+const MKT_BRAND_COLOR = {
+  "Relocators":        {bar:"#1F5C9E", tint:"#E6F1FB"},
+  "Nobody Move":       {bar:"#7A2E4A", tint:"#FBEAF0"},
+  "Sisters in Charge": {bar:"#0F6E56", tint:"#E1F5EE"}
+};
 /* Content calendar option lists. */
+/* Content items may target Facebook and Instagram together: the same post goes
+   out to both at the same time, so it is ONE calendar item, not two. This list
+   is content-only — MKT_PLATFORMS stays single-platform because the performance
+   side (accounts, entries, charts) reports per individual platform. */
+const MKT_COMBO_PLATFORMS = { "Facebook + Instagram": ["Facebook","Instagram"] };
+const MKT_CONTENT_PLATFORMS = MKT_PLATFORMS.concat(Object.keys(MKT_COMBO_PLATFORMS));
+/* Platforms a content item counts as, for filtering and icons. */
+function mktContentPlatforms(p){ return MKT_COMBO_PLATFORMS[p] || (p ? [p] : []); }
+function mktContentPlatformIcon(p){ return mktContentPlatforms(p).map(x=>MKT_PLATFORM_ICON[x]||"").join(""); }
 const MKT_CONTENT_TYPES = ["Reel","Carousel","Static Post","Story","YouTube Video","TikTok Video","Blog","Email","Ad","Other"];
 const MKT_CONTENT_STATUS = ["Idea","To Do","In Progress","Needs Review","Approved","Scheduled","Posted","Stuck"];
 const MKT_CONTENT_STATUS_CLASS = {"Idea":"s-todo","To Do":"s-todo","In Progress":"s-prog","Needs Review":"s-approval","Approved":"s-done","Scheduled":"s-prog","Posted":"s-done","Stuck":"s-block"};
@@ -619,6 +639,7 @@ const state = {
     supabaseAnon: DEFAULT_SUPABASE_ANON,
     emailEndpoint: "/api/send-email",
     reminderLeadMin: 120,
+    notificationsEnabled: false,
     team: DEFAULT_TEAM.slice()
   },
   user: "",
@@ -728,7 +749,7 @@ async function loadTasks(){
       // Note: emailEndpoint is intentionally NOT loaded — the endpoint is a fixed
       // code constant (EMAIL_ENDPOINT). Older saved settings may contain a stale
       // value (e.g. /api/notify); ignoring it prevents calling a dead endpoint.
-      ["reminderLeadMin","team"].forEach(k=>{
+      ["reminderLeadMin","team","notificationsEnabled"].forEach(k=>{
         if(cfgRow.data[k]!=null) state.cfg[k]=cfgRow.data[k];
       });
       MANAGERS.forEach(mn=>{ if(!state.cfg.team.some(m=>m.name===mn)) state.cfg.team.push({name:mn, department:"Managers", role:"Manager", email:"", phone:""}); });
@@ -784,6 +805,7 @@ async function deleteTaskRemote(id){
 async function persistSharedSettings(){
   const shared = {
     reminderLeadMin: state.cfg.reminderLeadMin,
+    notificationsEnabled: state.cfg.notificationsEnabled,
     team: state.cfg.team
   };
   if(state.mode==="live" && state.sb){
@@ -845,6 +867,7 @@ function ensureNotif(t){
 }
 
 async function notifyAssigned(t, reason){
+  if(!state.cfg.notificationsEnabled) return;
   const n = ensureNotif(t);
   if(!t.owner) return;
   if(reason==="created" && n.assigned) return;
@@ -855,6 +878,7 @@ async function notifyAssigned(t, reason){
 
 /* Email the manager once when a task enters "For Approval". */
 async function notifyApproval(t){
+  if(!state.cfg.notificationsEnabled) return;
   const n = ensureNotif(t);
   if(t.status!=="For Approval" || n.approval) return;
   n.approval = true;                 // mark once; do not retry on failure
@@ -867,6 +891,7 @@ async function notifyApproval(t){
    5xx never causes the 60s scan to retry the same task again and again. */
 let _scanning = false;
 async function notificationScan(){
+  if(!state.cfg.notificationsEnabled) return;
   if(_scanning) return; _scanning = true;        // never overlap scans
   try{
     const lead = (state.cfg.reminderLeadMin||120) * 60000;
@@ -2257,11 +2282,26 @@ function mktFilteredContent(){
     if(f.from && c.date && c.date<f.from) return false;
     if(f.to && c.date && c.date>f.to) return false;
     if(f.brand && c.brand!==f.brand) return false;
-    if(f.platforms&&f.platforms.length&&!f.platforms.includes(c.platform)) return false;
+    // A combined item ("Facebook + Instagram") matches EITHER platform chip, so
+    // filtering by Facebook does not hide posts that also go to Instagram.
+    if(f.platforms&&f.platforms.length&&!mktContentPlatforms(c.platform).some(p=>f.platforms.includes(p))) return false;
     if(f.owner && c.owner!==f.owner) return false;
     if(f.status && c.status!==f.status) return false;
     return true;
   });
+}
+/* Brand colour coding for content rows. The chip uses the brand's header fill
+   from the workbook with that tab's light tint as the text colour; the row gets a
+   matching left edge so a mixed-brand calendar is scannable at a glance. */
+function mktBrandChip(brand){
+  if(!brand) return '—';
+  const col=MKT_BRAND_COLOR[brand];
+  if(!col) return esc(brand);
+  return `<span class="brand-chip" style="background:${col.bar};color:${col.tint}">${esc(brand)}</span>`;
+}
+function mktBrandRowStyle(brand){
+  const col=MKT_BRAND_COLOR[brand];
+  return col ? ` data-brand-bar style="--bc:${col.bar}"` : '';
 }
 function mktContentRow(c){
   const sc=MKT_CONTENT_STATUS_CLASS[c.status]||'s-todo';
@@ -2269,8 +2309,8 @@ function mktContentRow(c){
     ? `<a href="${esc(c.file_url)}" target="_blank" rel="noreferrer">Open File</a> · <a href="#" data-mktcatt="${c.id}">Edit</a>`
     : `<a href="#" data-mktcatt="${c.id}">Attachment</a>`;
   const link = c.post_link?`<a href="${esc(c.post_link)}" target="_blank" rel="noreferrer">link</a>`:'—';
-  return `<tr>
-    <td>${esc(c.date||'—')}</td><td>${esc(c.brand||'—')}</td><td>${MKT_PLATFORM_ICON[c.platform]||''} ${esc(c.platform||'—')}</td>
+  return `<tr${mktBrandRowStyle(c.brand)}>
+    <td>${esc(c.date||'—')}</td><td>${mktBrandChip(c.brand)}</td><td>${mktContentPlatformIcon(c.platform)} ${esc(c.platform||'—')}</td>
     <td style="max-width:220px;white-space:normal">${esc(c.title||'—')}</td><td>${esc(c.content_type||'—')}</td><td>${esc(c.owner||'—')}</td>
     <td><span class="stat ${sc}">${esc(c.status)}</span></td>
     <td>${c.due_date?esc(c.due_date+(c.due_time?' '+c.due_time:'')):'—'}</td>
@@ -2318,7 +2358,7 @@ function mktTabScheduled(){
     ${content.length?`<div style="overflow-x:auto"><table class="mkt-tbl"><thead><tr><th>Publish</th><th>Brand</th><th>Platform</th><th>Title / Idea</th><th>Type</th><th>Owner</th><th>Status</th><th>File</th>${isAdmin()?'<th></th>':''}</tr></thead>
       <tbody>${content.map(c=>{ const sc=MKT_CONTENT_STATUS_CLASS[c.status]||'s-todo';
         const att=c.file_url?`<a href="${esc(c.file_url)}" target="_blank" rel="noreferrer">Open File</a>`:`<a href="#" data-mktcatt="${c.id}">Attachment</a>`;
-        return `<tr><td>${esc(c.publish_date||c.due_date||'—')}${c.publish_time?' '+esc(c.publish_time):''}</td><td>${esc(c.brand||'—')}</td><td>${MKT_PLATFORM_ICON[c.platform]||''} ${esc(c.platform||'')}</td>
+        return `<tr${mktBrandRowStyle(c.brand)}><td>${esc(c.publish_date||c.due_date||'—')}${c.publish_time?' '+esc(c.publish_time):''}</td><td>${mktBrandChip(c.brand)}</td><td>${mktContentPlatformIcon(c.platform)} ${esc(c.platform||'')}</td>
         <td style="max-width:220px;white-space:normal">${esc(c.title||'—')}</td><td>${esc(c.content_type)}</td><td>${esc(c.owner||'—')}</td><td><span class="stat ${sc}">${esc(c.status)}</span></td><td>${att}</td>
         ${isAdmin()?`<td><button class="micro" data-mktcedit="${c.id}">✎</button></td>`:''}</tr>`; }).join("")}</tbody></table></div>`
       :'<div class="empty">Nothing scheduled. Add content in the Content Calendar.</div>'}
@@ -2453,7 +2493,7 @@ function renderMktContentModal(){
       <div class="fld full"><label>Title / Idea</label><input data-mkc="title" value="${esc(c.title)}" placeholder="e.g. Behind-the-scenes reel"/></div>
       <div class="fld"><label>Date</label><input type="date" data-mkc="date" value="${esc(c.date)}"/></div>
       <div class="fld"><label>Brand</label><select data-mkc="brand"><option value="">—</option>${sel(MKT_BRANDS,c.brand)}</select></div>
-      <div class="fld"><label>Platform</label><select data-mkc="platform"><option value="">—</option>${sel(MKT_PLATFORMS,c.platform)}</select></div>
+      <div class="fld"><label>Platform</label><select data-mkc="platform"><option value="">—</option>${sel(MKT_CONTENT_PLATFORMS,c.platform)}</select></div>
       <div class="fld"><label>Content Type</label><select data-mkc="content_type">${sel(MKT_CONTENT_TYPES,c.content_type)}</select></div>
       <div class="fld"><label>Owner</label><input data-mkc="owner" list="mkcOwners" value="${esc(c.owner)}"/><datalist id="mkcOwners">${ownersList().map(o=>`<option value="${esc(o)}">`).join("")}</datalist></div>
       <div class="fld"><label>Status</label><select data-mkc="status">${sel(MKT_CONTENT_STATUS,c.status)}</select></div>
@@ -2638,9 +2678,10 @@ function viewSettings(){
   </div>
   <div class="card sect" style="margin-bottom:16px">
     <h2>📧 Email Notifications</h2>
-    <div class="sub" style="margin-bottom:12px">Emails the <b>owner</b> when a task is assigned, the <b>owner + cc manager</b> when a task is due soon (2 hours before, by default) and when overdue, and the <b>manager</b> when a task is marked <b>For Approval</b>. Repeat sends are prevented (tracked inside each task's data). Addresses come from the Team Directory below.</div>
+    <div class="sub" style="margin-bottom:12px">When enabled, emails the <b>owner</b> when a task is assigned, the <b>owner + cc manager</b> when a task is due soon (2 hours before, by default) and when overdue, and the <b>manager</b> when a task is marked <b>For Approval</b>. Repeat sends are prevented (tracked inside each task's data). Addresses come from the Team Directory below.</div>
     <div class="hint" style="margin-bottom:12px">📨 Sending is handled by the serverless function <code class="k">/api/send-email</code>, which holds the email-provider key (e.g. Resend) as a Vercel env var <code class="k">RESEND_API_KEY</code>. No API key is stored in this page. See the README for the function code and setup.</div>
     <div class="form-grid">
+      <div class="fld"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="gcEnabled" ${state.cfg.notificationsEnabled?'checked':''}/> Enable task alerts</label></div>
       <div class="fld"><label>Due-soon reminder timing</label><select id="gcLead">${r}</select></div>
     </div>
     <div style="margin-top:12px"><button class="btn primary" id="saveGc">Save notifications</button> <button class="btn" id="testGc">Send test email</button></div>
@@ -2664,6 +2705,7 @@ function bindSettings(c){
   $("#saveGc").onclick=async()=>{
     if(!requireAdmin()) return;
     state.cfg.reminderLeadMin=parseInt($("#gcLead").value,10)||120;
+    state.cfg.notificationsEnabled=$("#gcEnabled").checked;
     saveConfig(); await persistSharedSettings(); toast("Notification settings saved");
   };
   $("#testGc").onclick=async()=>{
@@ -3443,6 +3485,15 @@ function renderImportModal(){
       - Content Calendar: new table `marketing_content` — run
         marketing-content.sql (falls back to localStorage if absent). Each item
         supports a file/link (Drive, Dropbox, Canva, CapCut, image/video URL).
+        Rows are colour-coded by brand (MKT_BRAND_COLOR) using the palette from
+        the posting-calendar workbook, so the board matches the spreadsheet.
+        A content item may target "Facebook + Instagram" when the same post goes
+        to both at the same time — one item, not two. Combined items match either
+        platform filter chip (see MKT_COMBO_PLATFORMS / mktContentPlatforms).
+        MKT_PLATFORMS itself stays single-platform: the performance side reports
+        per individual account, so combined values must never leak into it.
+        The 4-week plan (60 posts, Aug 24 - Sep 20 2026, 20 per brand) is seeded
+        by marketing-content-seed.sql — idempotent, upserts on id.
       - Marketing Tasks reuse the EXISTING `tasks` table with department =
         'Marketing' (no new table) — same statuses, cadence, approvals,
         attachments, recurring, archive, future-hiding. Optional brand/platform
