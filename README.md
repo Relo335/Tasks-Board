@@ -43,9 +43,33 @@ create the table (the app falls back to localStorage if it's missing).
 rather than duplicating it. Status stays `Scheduled` and owner is blank for the
 team to fill in.
 
+**`marketing-content-cycles.sql`** then repeats that plan forward so the calendar
+runs continuously — after post 20 it cycles back to post 1. The plan is exactly
+28 days long, so shifting it by multiples of 28 puts every post back on the same
+weekday *and* the same time slot, which keeps each brand's day, time and content
+type exactly as the sheet specifies (and keeps the weekday written in each note
+correct).
+
+It is currently set to **2 extra cycles: 180 posts, Aug 24 – Nov 15 2026**, about
+three months, with content on every single day. That is deliberately short — long
+enough to judge whether repeating the sheet's schedule actually performs, short
+enough to change course cheaply. Raise the bound in its `generate_series` and
+re-run to extend:
+
+| bound | through | posts |
+|---|---|---|
+| `2` | Nov 15 2026 | 180 |
+| `3` | Dec 13 2026 | 240 |
+| `5` | Feb 7 2027 | 360 |
+| `12` | Aug 22 2027 | 780 (one year) |
+
+It only ever inserts (`on conflict do nothing`), so re-running is safe: a post
+your team has edited, attached a file to, or marked Posted is never overwritten.
+One caveat — a post you deliberately *deleted* will reappear if you run it again.
+
 The tab opens on a **month grid** — a real calendar, one coloured pill per post
-showing its time and title. Click a post to open it, or an empty day to add one
-on that date; use **Prev / Next / Today** to move between months. The **List**
+showing its time and title. Click a post to open it, or a day to add one on that
+date; use **Prev / Next / Today** to move between months. The **List**
 toggle switches back to the sortable table with all columns. On a phone the grid
 becomes a stacked day list. Posts are colour-coded by brand, using the same
 palette as the workbook:

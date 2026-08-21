@@ -2435,7 +2435,7 @@ function mktTabCalendar(){
       </div>
     </div>
     ${state.mkt.contentMissing&&state.mode==='live'?'<div class="banner demo" style="margin-bottom:12px">⚠ Table <code class="k">marketing_content</code> not found — saving locally for now. Run the content SQL (bottom of index.html) to share across the team.</div>':''}
-    <div class="sub" style="margin-bottom:12px">Plan and track content. Each item can hold a file/link (Drive, Dropbox, Canva, CapCut, image/video URL). ${state.mkt.contentView==="list"?'Click <b>Attachment</b> to add one without editing the whole item.':'Click a post to open it'+(isAdmin()?', or an empty day to add one.':'.')}</div>
+    <div class="sub" style="margin-bottom:12px">Plan and track content. Each item can hold a file/link (Drive, Dropbox, Canva, CapCut, image/video URL). ${state.mkt.contentView==="list"?'Click <b>Attachment</b> to add one without editing the whole item.':'Click a post to open it'+(isAdmin()?', or a day to add one.':'.')}</div>
     ${state.mkt.contentView==="list"
       ? (list.length?`<div style="overflow-x:auto"><table class="mkt-tbl">
       <thead><tr><th>Date</th><th>Brand</th><th>Platform</th><th>Title / Idea</th><th>Type</th><th>Owner</th><th>Status</th><th>Due</th><th>Publish</th><th>File</th><th>Post</th>${isAdmin()?'<th></th>':''}</tr></thead>
@@ -3615,6 +3615,16 @@ function renderImportModal(){
         per individual account, so combined values must never leak into it.
         The 4-week plan (60 posts, Aug 24 - Sep 20 2026, 20 per brand) is seeded
         by marketing-content-seed.sql — idempotent, upserts on id.
+        marketing-content-cycles.sql then repeats that plan forward: the plan is
+        exactly 28 days, so shifting by multiples of 28 keeps every post on the
+        same weekday AND time slot (which is why the weekday in each note stays
+        true), and keeps each brand's day/time/content-type exactly as the sheet
+        specifies. After post 20 the cycle returns to post 1. Currently set to 2
+        extra cycles = 180 posts through Nov 15 2026 (~3 months) — deliberately
+        short, to test whether repeating the schedule performs before committing
+        further. Raise the generate_series bound and re-run to extend. It inserts
+        only, never updates, so a post the team has edited or marked Posted is
+        never clobbered; a post they DELETED does come back on a re-run.
         The tab renders a real month grid by default (mktContentMonth), with a
         Calendar/List toggle; the old table is still there under List. Posts are
         placed by publish_date, coloured by brand, and clicking one opens it —
