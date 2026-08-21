@@ -246,16 +246,17 @@
   .cell.big{min-height:190px}
   .calpill.dept-pill{border-left:0;font-weight:600;font-size:11px;padding:3px 8px;cursor:pointer}
   .calpill.dept-pill:hover{filter:brightness(1.08)}
-  .calgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:1px;background:var(--border);border:1px solid var(--border);
+  .calgrid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:1px;background:var(--border);border:1px solid var(--border);
     border-radius:12px;overflow:hidden}
   .calgrid .dow{background:var(--card2);padding:8px;text-align:center;font-size:11px;color:var(--muted2);font-weight:700;text-transform:uppercase}
-  .cell{background:var(--card);min-height:108px;padding:7px;cursor:pointer;display:flex;flex-direction:column;gap:4px}
+  .cell{background:var(--card);min-height:108px;padding:7px;cursor:pointer;display:flex;flex-direction:column;gap:4px;min-width:0;overflow:hidden}
   .cell:hover{background:var(--card2)}
   .cell.out{background:var(--bg2);opacity:.5}
   .cell.today .dnum{background:var(--accent);color:#fff;border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center}
   .cell .dnum{font-size:12px;color:var(--muted);font-weight:700}
   .calpill{display:flex;align-items:center;gap:5px;font-size:10.5px;padding:2px 6px;border-radius:6px;background:var(--card2);
-    border-left:3px solid var(--muted);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+    border-left:3px solid var(--muted);overflow:hidden;white-space:nowrap;text-overflow:ellipsis;min-width:0}
+  .calpill>span{min-width:0}
   .calpill .ini{font-weight:700;font-size:9px;color:#10131a;border-radius:4px;padding:0 3px}
   .calpill .ct{font-size:9.5px;color:var(--muted);margin-left:auto}
   .more{font-size:10.5px;color:var(--muted);font-weight:600;padding-left:3px}
@@ -385,6 +386,16 @@
   table.mkt-tbl .num{text-align:right;font-variant-numeric:tabular-nums}
   table.mkt-tbl tr[data-brand-bar] td:first-child{box-shadow:inset 3px 0 0 var(--bc)}
   .brand-chip{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;white-space:nowrap}
+  .mktcal-toggle{display:flex;border:1px solid var(--border);border-radius:10px;overflow:hidden}
+  .mktcal-toggle .seg{padding:7px 14px;font-size:12.5px;font-weight:700;cursor:pointer;background:var(--card);color:var(--muted);border:0;border-right:1px solid var(--border)}
+  .mktcal-toggle .seg:last-child{border-right:0}
+  .mktcal-toggle .seg:hover{color:var(--text)}
+  .mktcal-toggle .seg.on{background:var(--accent);color:#fff}
+  .mktcal-legend{display:flex;flex-wrap:wrap;gap:14px;margin:0 0 12px;font-size:12px;color:var(--muted)}
+  .mktcal-legend .lg{display:inline-flex;align-items:center;gap:6px}
+  .mktcal-legend .lg i{width:10px;height:10px;border-radius:3px;display:inline-block}
+  .mktcal-legend .lg b{color:var(--text)}
+  .calpill.posted{opacity:.55}
   .mkt-chart{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px}
   .mkt-chart h3{margin:0 0 10px;font-size:13px;font-weight:700}
   .mkt-chart svg{display:block;width:100%;height:auto;overflow:visible}
@@ -656,6 +667,7 @@ const state = {
   calView: "month",         // "today" | "week" | "month"
   navOpen: false,           // mobile sidebar open
   mkt: { entries:[], accounts:[], content:[], tab:"dashboard", metric:"followers",
+         contentView:"calendar", contentRef:null,   // month grid vs list; null = pick on first render
          loaded:false, loading:false, tableMissing:false, contentMissing:false,
          filt:{ from:"", to:"", brand:"", platforms:[], account:"", week:"", month:"", owner:"", status:"" },
          accountSel:"", weekSel:"", monthSel:"", taskDash:null, reportNotes:"" },
@@ -2319,19 +2331,117 @@ function mktContentRow(c){
     ${isAdmin()?`<td style="white-space:nowrap"><button class="micro" data-mktcedit="${c.id}">✎</button> <button class="micro del" data-mktcdel="${c.id}">🗑</button></td>`:''}
   </tr>`;
 }
+/* ---- Content Calendar: month grid ------------------------------------------
+   Same grid/pill CSS as the task calendar so it reads as one app. Items are
+   placed by publish date (falling back to the plain date) and coloured by
+   brand. Clicking a post opens it; clicking an empty day starts a new one on
+   that date. */
+function mktContentByDay(list){
+  const by={};
+  list.forEach(c=>{ const k=(c.publish_date||c.date||"").slice(0,10); if(k) (by[k]=by[k]||[]).push(c); });
+  // Earliest slot first, undated-time last.
+  Object.values(by).forEach(a=>a.sort((x,y)=>(x.publish_time||"99:99").localeCompare(y.publish_time||"99:99")));
+  return by;
+}
+/* The month to show on first paint: the current month if it holds content,
+   otherwise the earliest month that does (so a future plan is not a blank grid). */
+function mktContentRef(list){
+  if(state.mkt.contentRef) return state.mkt.contentRef;
+  const now=new Date(), pre=now.toISOString().slice(0,7);
+  const months=list.map(c=>(c.publish_date||c.date||"").slice(0,7)).filter(Boolean).sort();
+  const pick=months.includes(pre)?pre:(months[0]||pre);
+  const [y,m]=pick.split("-").map(Number);
+  return (state.mkt.contentRef=new Date(y,m-1,1));
+}
+function mktContentPill(c){
+  const col=MKT_BRAND_COLOR[c.brand];
+  const style=col?`background:${col.bar};color:${col.tint}`:"background:var(--card2);color:var(--text)";
+  const time=c.publish_time?fmtTime(c.publish_time)+" ":"";
+  const tip=[c.brand,c.platform,c.status,c.content_type].filter(Boolean).join(" · ")+" — "+(c.title||"Untitled");
+  return `<div class="calpill dept-pill${c.status==="Posted"?" posted":""}" data-mktcopen="${c.id}" title="${esc(tip)}" style="${style}">
+    <span style="overflow:hidden;text-overflow:ellipsis">${c.status==="Posted"?"✓ ":""}${esc(time)}${esc(c.title||"Untitled")}</span></div>`;
+}
+function mktContentLegend(list){
+  const counts={};
+  list.forEach(c=>{ if(c.brand) counts[c.brand]=(counts[c.brand]||0)+1; });
+  const keys=Object.keys(counts).sort();
+  if(!keys.length) return "";
+  return `<div class="mktcal-legend">${keys.map(b=>{
+    const col=MKT_BRAND_COLOR[b];
+    return `<span class="lg"><i style="background:${col?col.bar:"var(--muted)"}"></i>${esc(b)} <b>${counts[b]}</b></span>`;
+  }).join("")}</div>`;
+}
+function mktContentMonth(list){
+  const ref=mktContentRef(list);
+  const byDay=mktContentByDay(list);
+  const todayK=todayStr();
+  const y=ref.getFullYear(), m=ref.getMonth();
+  const daysInMonth=new Date(y,m+1,0).getDate();
+  const inMonth=list.filter(c=>{ const k=(c.publish_date||c.date||""); return k.slice(0,7)===`${y}-${String(m+1).padStart(2,"0")}`; });
+
+  const nav=`<div class="calbar">
+      <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
+        <button class="btn sm" data-mktcalnav="prev">‹ Prev</button>
+        <h2>${ref.toLocaleDateString(undefined,{month:"long",year:"numeric"})}</h2>
+        <button class="btn sm" data-mktcalnav="next">Next ›</button>
+        <button class="btn sm" data-mktcalnav="today">Today</button>
+      </div>
+    </div>
+    ${mktContentLegend(inMonth)}`;
+
+  if(!inMonth.length && !list.length)
+    return nav+`<div class="empty">No content yet. ${isAdmin()?"Click <b>Add Content</b> to plan your first post.":""}</div>`;
+
+  const dayCell=(date,out)=>{
+    const k=localKey(date), items=byDay[k]||[];
+    const limit=4;
+    const pills=items.slice(0,limit).map(mktContentPill).join("");
+    const more=items.length>limit?`<div class="more">+${items.length-limit} more</div>`:"";
+    return `<div class="cell ${out?"out":""} ${k===todayK?"today":""}" ${isAdmin()?`data-mktcday="${k}"`:""}>
+      <div class="dnum">${date.getDate()}</div>${pills}${more}</div>`;
+  };
+
+  if(isMobile()){
+    const secs=[];
+    for(let d=1;d<=daysInMonth;d++){
+      const date=new Date(y,m,d), k=localKey(date), items=byDay[k]||[];
+      if(!items.length) continue;            // skip empty days on a phone
+      secs.push(`<div class="cal-daysec ${k===todayK?"today":""}">
+        <div class="cal-dayhd">${date.toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"})}<span class="cnt">${items.length}</span></div>
+        <div style="display:flex;flex-direction:column;gap:6px">${items.map(mktContentPill).join("")}</div></div>`);
+    }
+    return nav+`<div class="cal-list">${secs.join("")||'<div class="empty">Nothing scheduled this month.</div>'}</div>`;
+  }
+
+  const dows=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+  const first=new Date(y,m,1), startDow=(first.getDay()+6)%7;
+  const cells=[];
+  for(let i=0;i<startDow;i++) cells.push({date:new Date(y,m,1-(startDow-i)),out:true});
+  for(let d=1;d<=daysInMonth;d++) cells.push({date:new Date(y,m,d),out:false});
+  while(cells.length%7!==0){ const l=cells[cells.length-1].date; cells.push({date:new Date(l.getFullYear(),l.getMonth(),l.getDate()+1),out:true}); }
+  return nav+`<div class="calgrid">${dows.map(d=>`<div class="dow">${d}</div>`).join("")}${cells.map(c=>dayCell(c.date,c.out)).join("")}</div>`;
+}
 function mktTabCalendar(){
   const list=mktFilteredContent().slice().sort((a,b)=>(b.publish_date||b.date||'').localeCompare(a.publish_date||a.date||''));
   return `<div class="card sect">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:6px">
       <h2 style="margin:0">Content Calendar <span class="cnt">${list.length}</span></h2>
-      ${isAdmin()?'<button class="btn primary" id="mktAddContent">＋ Add Content</button>':''}
+      <div style="display:flex;align-items:center;gap:10px;margin-left:auto">
+        <div class="mktcal-toggle">
+          <button class="seg ${state.mkt.contentView!=="list"?"on":""}" data-mktcview="calendar">🗓 Calendar</button>
+          <button class="seg ${state.mkt.contentView==="list"?"on":""}" data-mktcview="list">☰ List</button>
+        </div>
+        ${isAdmin()?'<button class="btn primary" id="mktAddContent">＋ Add Content</button>':''}
+      </div>
     </div>
     ${state.mkt.contentMissing&&state.mode==='live'?'<div class="banner demo" style="margin-bottom:12px">⚠ Table <code class="k">marketing_content</code> not found — saving locally for now. Run the content SQL (bottom of index.html) to share across the team.</div>':''}
-    <div class="sub" style="margin-bottom:12px">Plan and track content. Each item can hold a file/link (Drive, Dropbox, Canva, CapCut, image/video URL). Click <b>Attachment</b> to add one without editing the whole item.</div>
-    ${list.length?`<div style="overflow-x:auto"><table class="mkt-tbl">
+    <div class="sub" style="margin-bottom:12px">Plan and track content. Each item can hold a file/link (Drive, Dropbox, Canva, CapCut, image/video URL). ${state.mkt.contentView==="list"?'Click <b>Attachment</b> to add one without editing the whole item.':'Click a post to open it'+(isAdmin()?', or an empty day to add one.':'.')}</div>
+    ${state.mkt.contentView==="list"
+      ? (list.length?`<div style="overflow-x:auto"><table class="mkt-tbl">
       <thead><tr><th>Date</th><th>Brand</th><th>Platform</th><th>Title / Idea</th><th>Type</th><th>Owner</th><th>Status</th><th>Due</th><th>Publish</th><th>File</th><th>Post</th>${isAdmin()?'<th></th>':''}</tr></thead>
       <tbody>${list.map(mktContentRow).join("")}</tbody></table></div>`
-      :`<div class="empty">No content yet. ${isAdmin()?'Click <b>Add Content</b> to plan your first post.':''}</div>`}
+      :`<div class="empty">No content yet. ${isAdmin()?'Click <b>Add Content</b> to plan your first post.':''}</div>`)
+      : mktContentMonth(list)}
   </div>`;
 }
 
@@ -2467,6 +2577,16 @@ function bindMarketing(c){
   const rn=$("#mktReportNotes"); if(rn) rn.oninput=()=>{ state.mkt.reportNotes=rn.value; };
   // content calendar
   const ac=$("#mktAddContent"); if(ac) ac.onclick=()=>openMktContentModal();
+  // content calendar: month grid <-> list, month nav, open a post, add on a day
+  c.querySelectorAll("[data-mktcview]").forEach(el=>el.onclick=()=>{ state.mkt.contentView=el.dataset.mktcview; renderContent(); });
+  c.querySelectorAll("[data-mktcalnav]").forEach(el=>el.onclick=()=>{
+    const d=el.dataset.mktcalnav;
+    if(d==="today") state.mkt.contentRef=new Date(new Date().getFullYear(),new Date().getMonth(),1);
+    else { const r=new Date(mktContentRef(mktFilteredContent())); r.setMonth(r.getMonth()+(d==="next"?1:-1)); state.mkt.contentRef=r; }
+    renderContent();
+  });
+  c.querySelectorAll("[data-mktcopen]").forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); openMktContentModal(el.dataset.mktcopen); });
+  c.querySelectorAll("[data-mktcday]").forEach(el=>el.onclick=()=>openMktContentModal(null, el.dataset.mktcday));
   c.querySelectorAll("[data-mktcedit]").forEach(el=>el.onclick=()=>openMktContentModal(el.dataset.mktcedit));
   c.querySelectorAll("[data-mktcdel]").forEach(el=>el.onclick=async()=>{ if(!requireAdmin())return; if(!confirm("Delete this content item?"))return; await mktDeleteContent(el.dataset.mktcdel); toast("Deleted"); renderContent(); });
   c.querySelectorAll("[data-mktcatt]").forEach(el=>el.onclick=(ev)=>{ ev.preventDefault(); openMktContentAttach(el.dataset.mktcatt); });
@@ -2482,8 +2602,9 @@ function bindMarketing(c){
 }
 
 /* ---- Content modals ---- */
-function openMktContentModal(id){ if(!requireAdmin())return; const ex=id?state.mkt.content.find(x=>x.id===id):null;
-  state.modal={type:"mktContent", row: ex?{...ex}:normMktContent({date:mktDateStr(),platform:(state.mkt.filt.platforms&&state.mkt.filt.platforms[0])||"Instagram",brand:state.mkt.filt.brand||MKT_BRANDS[0],owner:state.user||""}), isNew:!ex}; renderModal(); }
+function openMktContentModal(id, presetDate){ if(!requireAdmin())return; const ex=id?state.mkt.content.find(x=>x.id===id):null;
+  const d=presetDate||mktDateStr();
+  state.modal={type:"mktContent", row: ex?{...ex}:normMktContent({date:d, publish_date:presetDate||"", platform:(state.mkt.filt.platforms&&state.mkt.filt.platforms[0])||"Instagram",brand:state.mkt.filt.brand||MKT_BRANDS[0],owner:state.user||""}), isNew:!ex}; renderModal(); }
 function renderMktContentModal(){
   const md=state.modal, c=md.row, root=$("#modal-root");
   const sel=(arr,v)=>arr.map(o=>`<option ${v===o?'selected':''}>${esc(o)}</option>`).join("");
@@ -3494,6 +3615,13 @@ function renderImportModal(){
         per individual account, so combined values must never leak into it.
         The 4-week plan (60 posts, Aug 24 - Sep 20 2026, 20 per brand) is seeded
         by marketing-content-seed.sql — idempotent, upserts on id.
+        The tab renders a real month grid by default (mktContentMonth), with a
+        Calendar/List toggle; the old table is still there under List. Posts are
+        placed by publish_date, coloured by brand, and clicking one opens it —
+        clicking an empty day starts a new post on that date. Phones get the
+        stacked day list instead of the grid, same as the task calendar. Note
+        .calgrid uses minmax(0,1fr): plain 1fr floors at min-content, so a long
+        nowrap pill title would push columns off screen.
       - Marketing Tasks reuse the EXISTING `tasks` table with department =
         'Marketing' (no new table) — same statuses, cadence, approvals,
         attachments, recurring, archive, future-hiding. Optional brand/platform
