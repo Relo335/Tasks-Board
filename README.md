@@ -86,6 +86,22 @@ items still show up when you filter by either Facebook or Instagram. The
 performance side (`marketing_entries`, accounts, charts) is unchanged and continues
 to report per individual platform.
 
+### Export Report
+The Export Report carries the **complete** weekly and monthly history as a matrix:
+one row per social account, one column per period. Four blocks — weekly values,
+weekly change, monthly values, monthly change — in both the printable PDF and the
+CSV (`marketing-performance.csv`). Everything honours the filters above it.
+
+A cell is that account's **latest reading inside the period**, so a week holding
+two entries reports the newer one rather than summing them; a blank means the
+account had no reading that period. Change is measured against that account's own
+previous *filled* period, so a reporting gap does not read as a crash.
+
+The TOTAL row carries each account's last known value forward. Summing the raw
+cells would count a non-reporting account as zero and render as a cliff in the
+totals when nothing actually happened; the row is labelled so the difference is
+visible.
+
 ### Retiring a social account
 Accounts whose channel no longer exists are listed in `MKT_HIDDEN_ACCOUNTS`
 (key `"Platform|Name"`) and disappear from every table, filter, chart and report.

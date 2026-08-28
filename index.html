@@ -386,6 +386,8 @@
   table.mkt-tbl .num{text-align:right;font-variant-numeric:tabular-nums}
   table.mkt-tbl tr[data-brand-bar] td:first-child{box-shadow:inset 3px 0 0 var(--bc)}
   .brand-chip{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;white-space:nowrap}
+  table.mkt-tbl tr.rtot td{font-weight:800;border-top:2px solid var(--border2);background:var(--card2)}
+  .rnote{font-size:11.5px;color:var(--muted2);margin:2px 0 6px}
   .mktcal-toggle{display:flex;border:1px solid var(--border);border-radius:10px;overflow:hidden}
   .mktcal-toggle .seg{padding:7px 14px;font-size:12.5px;font-weight:700;cursor:pointer;background:var(--card);color:var(--muted);border:0;border-right:1px solid var(--border)}
   .mktcal-toggle .seg:last-child{border-right:0}
@@ -2183,6 +2185,67 @@ function mktPlatformGrouped(ents, platform, metric, mode){
       return inK.length? inK[inK.length-1][metric] : null; })}));
   return {categories, series};
 }
+/* ---- Complete performance matrix (socials down, periods across) ------------
+   One row per social account, one column per period — week ending, or month.
+   A cell is that account's LATEST reading inside the period, so a week holding
+   two entries reports the newer one rather than summing them; blank means the
+   account had no reading that period. Change is measured against that account's
+   own previous filled period, so a gap in reporting does not read as a crash. */
+function mktPivotMatrix(ents, metric, mode){
+  const keyFn   = mode==='week' ? (d=>mktWeekKey(d))     : (d=>mktMonthKey(d));
+  // Full month name, not mktMonthShort: "Jun 26" sitting beside weekly columns
+  // labelled "Jun 7" reads as June 26th rather than June 2026.
+  const labelFn = mode==='week' ? (k=>mktWeekEndShort(k)) : (k=>mktMonthLabel(k));
+  const periods=[...new Set(ents.map(e=>keyFn(e.entry_date)).filter(Boolean))].sort();
+  const rows=new Map();
+  periods.forEach(p=>{
+    mktLatestPerAccount(ents.filter(e=>keyFn(e.entry_date)===p)).forEach(e=>{
+      const k=mktAcctKey(e);
+      if(!rows.has(k)) rows.set(k,{platform:e.platform,name:e.account_name,brand:e.brand||"",vals:{},chg:{}});
+      const r=rows.get(k);
+      if(e.brand) r.brand=e.brand;
+      r.vals[p] = e[metric]!=null ? e[metric] : null;
+    });
+  });
+  const list=[...rows.values()].sort((a,b)=>
+    (MKT_PLATFORMS.indexOf(a.platform)-MKT_PLATFORMS.indexOf(b.platform)) || a.name.localeCompare(b.name));
+  list.forEach(r=>{ let prev=null;
+    periods.forEach(p=>{ const v=r.vals[p];
+      r.chg[p] = (v!=null && prev!=null) ? v-prev : null;
+      if(v!=null) prev=v; }); });
+  // TOTAL carries each account's last known value forward. Summing the raw cells
+  // would count an account that simply did not report that period as zero, which
+  // renders as a cliff in the totals when nothing actually happened.
+  const totals={}, carried={};
+  let anyCarried=false;
+  periods.forEach(p=>{
+    let t=0;
+    list.forEach(r=>{
+      const v=r.vals[p];
+      if(v!=null) carried[r.name+"|"+r.platform]=v;
+      else if(carried[r.name+"|"+r.platform]!=null) anyCarried=true;
+      const use=v!=null?v:carried[r.name+"|"+r.platform];
+      if(use!=null) t+=use;
+    });
+    totals[p]=t;
+  });
+  return { periods, labels:periods.map(labelFn), rows:list, totals, mode, carried:anyCarried };
+}
+/* Render a matrix as a table. change:true shows period-over-period movement
+   instead of the raw value (and drops the TOTAL row, which would be misleading
+   when accounts report on different weeks). */
+function mktPivotTable(mx, change){
+  if(!mx.rows.length || !mx.periods.length) return '<div class="empty">No data in the current filter.</div>';
+  const field = change ? 'chg' : 'vals';
+  const fmt   = change ? mktSigned : mktComma;
+  const head=`<tr><th>Platform</th><th>Social Account</th><th>Brand</th>${mx.labels.map(l=>`<th class="num">${esc(l)}</th>`).join("")}</tr>`;
+  const body=mx.rows.map(r=>`<tr><td>${MKT_PLATFORM_ICON[r.platform]||''} ${esc(r.platform)}</td><td>${esc(r.name)}</td><td>${esc(r.brand||'—')}</td>${
+    mx.periods.map(p=>`<td class="num">${r[field][p]==null?'—':fmt(r[field][p])}</td>`).join("")}</tr>`).join("");
+  const totLabel = 'TOTAL — all socials' + (mx.carried?' (last known carried forward)':'');
+  const tot = change ? '' :
+    `<tr class="rtot"><td colspan="3">${totLabel}</td>${mx.periods.map(p=>`<td class="num">${mktComma(mx.totals[p])}</td>`).join("")}</tr>`;
+  return `<div style="overflow-x:auto"><table class="mkt-tbl"><thead>${head}</thead><tbody>${body}${tot}</tbody></table></div>`;
+}
 /* The full report body (Followers/Subscribers only — Views is hidden for now).
    Shared by the on-screen preview and the printable doc. */
 function mktReportHTML(notes){
@@ -2208,6 +2271,7 @@ function mktReportHTML(notes){
       <div class="mkt-charts" style="grid-template-columns:1fr">${mktGroupedBarChart(title,g.categories,g.series)}</div>
       ${platTable(p, mode==='week'?'wow':'mom')}`; }).filter(Boolean).join("");
   const weeklyPlat=section('week'), monthlyPlat=section('month');
+  const wkMx=mktPivotMatrix(ents,'followers','week'), moMx=mktPivotMatrix(ents,'followers','month');
   return `<div class="rpt">
     <h1>Marketing Performance Report — Followers / Subscribers</h1>
     <div class="rmeta">Date range: <b>${esc(range)}</b> &nbsp;·&nbsp; Week ending: <b>${esc(weekEnding)}</b> &nbsp;·&nbsp; Generated ${esc(new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}))}</div>
@@ -2221,13 +2285,25 @@ function mktReportHTML(notes){
       ${card("Lowest Growth Account",lo?esc(lo.name)+' ('+mktPct(lo.m.wowGrowth)+')':'—')}
     </div>
 
-    <h2>2 · Weekly Followers Comparison (by platform · x-axis = Week Ending)</h2>
+    <h2>2 · Weekly Performance — every social, every week</h2>
+    <div class="rnote">Followers / subscribers per account at each week ending. Blank = no reading that week.</div>
+    ${mktPivotTable(wkMx,false)}
+    <div class="rnote" style="margin-top:14px">Change vs that account's previous reported week.</div>
+    ${mktPivotTable(wkMx,true)}
+
+    <h2>3 · Monthly Performance — every social, every month</h2>
+    <div class="rnote">Followers / subscribers per account at each month end.</div>
+    ${mktPivotTable(moMx,false)}
+    <div class="rnote" style="margin-top:14px">Change vs that account's previous reported month.</div>
+    ${mktPivotTable(moMx,true)}
+
+    <h2>4 · Weekly Followers Comparison (by platform · x-axis = Week Ending)</h2>
     ${weeklyPlat||'<div class="empty">No weekly follower data in range.</div>'}
 
-    <h2>3 · Monthly Followers Comparison (by platform)</h2>
+    <h2>5 · Monthly Followers Comparison (by platform)</h2>
     ${monthlyPlat||'<div class="empty">No monthly follower data in range.</div>'}
 
-    <h2>4 · Notes</h2>
+    <h2>6 · Notes</h2>
     <div class="rnotes">${notes?esc(notes):'<span style="color:var(--muted2)">No notes added.</span>'}</div>
   </div>`;
 }
@@ -2238,6 +2314,9 @@ function mktReportDoc(notes){
     :root{--muted2:#888}
     *{box-sizing:border-box} body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#12141a;background:#fff;margin:26px;font-size:13px}
     .rpt h1{font-size:22px;margin:0 0 4px} .rmeta{color:#555;font-size:12px;margin-bottom:16px}
+    .rpt tr.rtot td{font-weight:800;border-top:2px solid #999;background:#f2f4f7}
+    .rpt .rnote{font-size:11px;color:#666;margin:2px 0 6px}
+    .rpt table{page-break-inside:auto} .rpt tr{page-break-inside:avoid}
     .rpt h2{font-size:15px;margin:22px 0 10px;border-bottom:2px solid #eaeaea;padding-bottom:6px;break-after:avoid}
     .mkt-tbl{width:100%;border-collapse:collapse;font-size:12px;margin:6px 0 4px}
     .mkt-tbl th{text-align:left;padding:6px 8px;border-bottom:1px solid #ccc;color:#666;font-size:10px;text-transform:uppercase;letter-spacing:.03em}
@@ -2265,22 +2344,45 @@ function mktPrintReport(){
   w.document.write(mktReportDoc(mktCurrentReportNotes())); w.document.close(); w.focus();
   setTimeout(()=>{ try{ w.print(); }catch(e){} }, 400);
 }
+/* CSV = the complete matrix, not just the latest period: socials down the rows,
+   every week (then every month) across the columns, values and change. This is
+   the export people open in Excel, so it carries more than the printed report. */
 function mktDownloadReportCSV(){
   const ents=mktFiltered();
-  const weeks=[...new Set(ents.map(e=>mktWeekKey(e.entry_date)).filter(Boolean))].sort();
-  const wkEnd=weeks.length?mktWeekEndLabel(weeks[weeks.length-1]):"";
-  const months=[...new Set(ents.map(e=>mktMonthKey(e.entry_date)).filter(Boolean))].sort();
-  const moLbl=months.length?mktMonthLabel(months[months.length-1]):"";
-  const rows=[["Section","Metric","Account","Brand","Platform","Period","Current","Previous","Change","GrowthPct"]];
-  mktAccountCurrent(ents,'followers').forEach(c=>{   // Followers/Subscribers only
-    rows.push(["Weekly","Followers",c.name,c.brand,c.platform,"Week ending "+wkEnd,c.m.cur,c.m.prevWeek,c.m.wowChange,c.m.wowGrowth!=null?c.m.wowGrowth.toFixed(1):""]);
-    rows.push(["Monthly","Followers",c.name,c.brand,c.platform,moLbl,c.m.cur,c.m.prevMonth,c.m.momChange,c.m.momGrowth!=null?c.m.momGrowth.toFixed(1):""]);
-  });
-  const csv=rows.map(r=>r.map(csvCell).join(",")).join("\n");
+  const wk=mktPivotMatrix(ents,'followers','week');
+  const mo=mktPivotMatrix(ents,'followers','month');
+  const rows=[];
+  rows.push(["Marketing Performance — Followers / Subscribers"]);
+  rows.push(["Date range", mktReportRange(ents)]);
+  rows.push(["Generated", new Date().toLocaleString('en-US')]);
+  rows.push([]);
+
+  const block=(title, mx, change)=>{
+    if(!mx.rows.length || !mx.periods.length){ rows.push([title]); rows.push(["No data in the current filter."]); rows.push([]); return; }
+    rows.push([title]);
+    rows.push(["Platform","Social Account","Brand",...mx.labels]);
+    mx.rows.forEach(r=>rows.push([r.platform, r.name, r.brand,
+      ...mx.periods.map(p=>{ const v=(change?r.chg:r.vals)[p]; return v==null?"":v; })]));
+    if(!change) rows.push(["TOTAL — all socials"+(mx.carried?" (last known carried forward)":""),"","",...mx.periods.map(p=>mx.totals[p])]);
+    rows.push([]);
+  };
+
+  block("WEEKLY — Followers / Subscribers (column = week ending)", wk, false);
+  block("WEEKLY — Change vs previous reported week", wk, true);
+  block("MONTHLY — Followers / Subscribers (column = month)", mo, false);
+  block("MONTHLY — Change vs previous reported month", mo, true);
+
+  const notes=mktCurrentReportNotes();
+  if(notes){ rows.push(["Notes"]); rows.push([notes]); }
+
+  const width=rows.reduce((m,r)=>Math.max(m,r.length),0);
+  const csv=rows.map(r=>{ const padded=r.concat(Array(width-r.length).fill("")); return padded.map(csvCell).join(","); }).join("\n");
   const blob=new Blob([csv],{type:"text/csv"}); const url=URL.createObjectURL(blob);
-  const a=document.createElement("a"); a.href=url; a.download="marketing-report.csv"; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-  toast("CSV downloaded");
+  const a=document.createElement("a"); a.href=url; a.download="marketing-performance.csv";
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  toast(`CSV downloaded — ${wk.rows.length} socials × ${wk.periods.length} weeks, ${mo.periods.length} months`);
 }
+
 function mktTabExport(){
   const ents=mktFiltered();
   const notes=mktCurrentReportNotes();
