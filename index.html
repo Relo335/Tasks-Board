@@ -530,9 +530,17 @@ const REMINDER_OPTIONS = [
 const MKT_BRANDS = ["Relocators","Nobody Move","Sisters in Charge","Robert Personal","Relocators & Sisters in Charge","Elle Jae's Corner","Rob Author"];
 /* Accounts hidden from all Marketing reports/tables/filters. Their rows stay in
    Supabase (not deleted) but are filtered out on load. Key = "Platform|Name". */
-const MKT_HIDDEN_ACCOUNTS = ["YouTube|Tony Video YouTube"];
+const MKT_HIDDEN_ACCOUNTS = [
+  "YouTube|Tony Video YouTube",
+  "YouTube|Elle Jae's Corner YouTube",   // channel deleted
+  "YouTube|Rob Author YouTube"            // channel deleted
+];
 /* Relabel old account rows on load (display + persists on next edit) without
-   deleting data. Key = "Platform|OldName" → { name, brand }. */
+   deleting data. Key = "Platform|OldName" → { name, brand }.
+   KEEP the Relocators YouTube entry even though Rob Author YouTube is now
+   hidden: renaming happens BEFORE the hidden-accounts filter, so those legacy
+   rows are relabelled and then dropped. Remove this rule and they would fall
+   back to "Relocators YouTube" and add their subscribers into Relocators. */
 const MKT_RENAME = {
   "YouTube|Relocators YouTube": { name:"Rob Author YouTube", brand:"Rob Author" }
 };
@@ -553,8 +561,6 @@ const MKT_DEFAULT_ACCOUNTS = [
   {brand:"Nobody Move",      platform:"TikTok",   name:"Nobody Move TikTok"},
   {brand:"Relocators",       platform:"TikTok",   name:"Relocators TikTok"},
   {brand:"Relocators & Sisters in Charge", platform:"YouTube", name:"Relocators & Sisters in Charge YouTube"},
-  {brand:"Elle Jae's Corner",platform:"YouTube",  name:"Elle Jae's Corner YouTube"},
-  {brand:"Rob Author",       platform:"YouTube",  name:"Rob Author YouTube"},
   {brand:"Nobody Move",      platform:"YouTube",  name:"Nobody Move YouTube"},
   {brand:"Robert Personal",  platform:"LinkedIn", name:"Robert Personal LinkedIn"}
 ];

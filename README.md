@@ -86,6 +86,21 @@ items still show up when you filter by either Facebook or Instagram. The
 performance side (`marketing_entries`, accounts, charts) is unchanged and continues
 to report per individual platform.
 
+### Retiring a social account
+Accounts whose channel no longer exists are listed in `MKT_HIDDEN_ACCOUNTS`
+(key `"Platform|Name"`) and disappear from every table, filter, chart and report.
+Their rows stay in `marketing_entries` — nothing is deleted, so the change is
+reversible by removing the line. Currently retired: **Tony Video YouTube**,
+**Elle Jae's Corner YouTube**, **Rob Author YouTube**.
+
+Retiring an account removes its followers from the org-wide **totals** on the
+dashboard and export report. Every other account's own numbers are unaffected.
+
+Note the `MKT_RENAME` rule for `Relocators YouTube` must stay even though
+`Rob Author YouTube` is now hidden: renaming runs *before* the hidden filter, so
+those legacy rows are relabelled and then dropped. Delete the rule and they fall
+back to "Relocators YouTube" and their subscribers rejoin Relocators' numbers.
+
 ## Email notifications (Resend serverless function)
 Task alerts are **off by default**. Turn them on in the app under **Settings →
 Email Notifications → Enable task alerts** (shared setting `notificationsEnabled`);
